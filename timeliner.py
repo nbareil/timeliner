@@ -20,6 +20,10 @@ from typing import Iterator, List, Optional, Pattern, Set
 import click
 from colorama import Fore, Style, init
 
+import tempfile
+import heapq
+from typing import BinaryIO, TextIO
+
 # Type aliases
 Timestamp = int
 PathStr = str
@@ -241,6 +245,156 @@ def get_period_key(timestamp: Timestamp, period: str) -> str:
     return dt.strftime("%Y")
 
 
+class ChunkedTimelineProcessor(TimelineProcessor):
+    """Processes timeline entries in chunks to handle large files."""
+
+    CHUNK_SIZE = 100000  # Number of lines per chunk
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.temp_files = []
+
+    def process_stream(self, stream: Iterator[str]) -> Iterator[str]:
+        """Process a stream of bodyfile lines in chunks."""
+        try:
+            # Split input into sorted chunks
+            chunk_files = self._create_sorted_chunks(stream)
+
+            # Merge chunks and yield results
+            yield from self._merge_chunks(chunk_files)
+        finally:
+            # Cleanup temporary files
+            self._cleanup_temp_files()
+
+    def _create_sorted_chunks(self, stream: Iterator[str]) -> List[Path]:
+        """Split input stream into sorted chunks stored in temporary files."""
+        chunk = []
+        chunk_files = []
+
+        for line in stream:
+            entry = BodyfileParser.parse_line(line)
+            if not entry:
+                continue
+            ts_seen = set()
+            # Process entry for all requested timestamp types
+            for time_type in self.time_filters:
+                timestamp = entry.get_timestamp(time_type)
+                if timestamp not in ts_seen and self._is_timestamp_valid(timestamp):
+                    chunk.append((timestamp, entry.name, line))
+                    ts_seen.add(timestamp)
+
+            if len(chunk) >= self.CHUNK_SIZE:
+                chunk_files.append(self._write_sorted_chunk(chunk))
+                chunk = []
+
+        # Write final chunk if not empty
+        if chunk:
+            chunk_files.append(self._write_sorted_chunk(chunk))
+
+        return chunk_files
+
+    def _write_sorted_chunk(self, chunk: List[tuple]) -> Path:
+        """Sort and write a chunk to a temporary file."""
+        # Sort chunk by timestamp and name
+        chunk.sort(key=lambda x: (x[0], x[1]))
+
+        # Create temporary file
+        temp_file = tempfile.NamedTemporaryFile(mode="w+", delete=False)
+        self.temp_files.append(Path(temp_file.name))
+
+        # Write sorted entries
+        for _, _, line in chunk:
+            temp_file.write(f"{line}\n")
+
+        temp_file.close()
+        return Path(temp_file.name)
+
+    def _merge_chunks(self, chunk_files: List[Path]) -> Iterator[str]:
+        """Merge sorted chunks using a heap."""
+        file_handles = []
+        entry_heap = []
+
+        try:
+            self._initialize_heap(chunk_files, file_handles, entry_heap)
+            yield from self._process_heap(entry_heap, file_handles)
+        finally:
+            self._close_file_handles(file_handles)
+
+    def _initialize_heap(
+        self, chunk_files: List[Path], file_handles: List[IO], entry_heap: List[tuple]
+    ):
+        """Initialize the heap with the first entry from each chunk file."""
+        for chunk_file in chunk_files:
+            fh = open(chunk_file, "r")
+            file_handles.append(fh)
+            line = fh.readline().strip()
+            if line:
+                entry = BodyfileParser.parse_line(line)
+                if entry:
+                    self._add_entry_to_heap(entry, line, fh, entry_heap)
+
+    def _add_entry_to_heap(self, entry, line: str, fh: IO, entry_heap: List[tuple]):
+        """Add an entry to the heap if it has a valid timestamp."""
+        ts_seen = set()
+        for time_type in self.time_filters:
+            timestamp = entry.get_timestamp(time_type)
+            if timestamp not in ts_seen and self._is_timestamp_valid(timestamp):
+                heapq.heappush(entry_heap, (timestamp, entry.name, line, fh))
+                ts_seen.add(timestamp)
+
+    def _process_heap(
+        self, entry_heap: List[tuple], file_handles: List[IO]
+    ) -> Iterator[str]:
+        """Process the heap and yield formatted entries."""
+        last_period = None
+        while entry_heap:
+            timestamp, name, line, fh = heapq.heappop(entry_heap)
+            entry = BodyfileParser.parse_line(line)
+            if entry:
+                yield from self._yield_formatted_entry(timestamp, entry, last_period)
+                last_period = self._get_current_period(timestamp)
+            self._process_next_line(fh, entry_heap)
+
+    def _yield_formatted_entry(
+        self, timestamp: datetime, entry, last_period
+    ) -> Iterator[str]:
+        """Yield a formatted entry, including a separator if necessary."""
+        if self.separate and not self.jsonl:
+            current_period = get_period_key(timestamp, self.separate)
+            if last_period is not None and current_period != last_period:
+                yield SEPARATOR
+        yield self._format_line(timestamp, entry)
+
+    def _get_current_period(self, timestamp: datetime) -> str:
+        """Get the current period key if separation is enabled."""
+        return (
+            get_period_key(timestamp, self.separate)
+            if self.separate and not self.jsonl
+            else None
+        )
+
+    def _process_next_line(self, fh: IO, entry_heap: List[tuple]):
+        """Process the next line from the file and add it to the heap if valid."""
+        next_line = fh.readline().strip()
+        if next_line:
+            next_entry = BodyfileParser.parse_line(next_line)
+            if next_entry:
+                self._add_entry_to_heap(next_entry, next_line, fh, entry_heap)
+
+    def _close_file_handles(self, file_handles: List[IO]):
+        """Close all file handles."""
+        for fh in file_handles:
+            fh.close()
+
+    def _cleanup_temp_files(self):
+        """Remove all temporary files."""
+        for temp_file in self.temp_files:
+            try:
+                temp_file.unlink()
+            except Exception:
+                pass
+
+
 def parse_datetime(dt_str: str) -> datetime:
     """Parse a datetime string in various formats."""
     for fmt in DATETIME_FORMATS:
@@ -256,7 +410,7 @@ def parse_datetime(dt_str: str) -> datetime:
 def process_input_file(path: Optional[Path]) -> Iterator[str]:
     # If no path is provided, use stdin
     file_obj = "-" if path is None else str(path)
-    with click.open_file(file_obj, "r", encoding="utf-8", errors="ignore") as f:
+    with click.open_file(file_obj, "r", encoding="utf-8", errors="replace") as f:
         yield from (line.strip() for line in f)
 
 
@@ -366,8 +520,8 @@ def main(filename: Optional[Path], **kwargs):
                 kwargs["highlight_file"], case_sensitive=kwargs["case_sensitive"]
             )
 
-        # Create processor
-        processor = TimelineProcessor(
+        # Create chunked processor
+        processor = ChunkedTimelineProcessor(
             separate=kwargs["separate"],
             since=since_dt,
             until=until_dt,

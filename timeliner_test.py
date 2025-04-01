@@ -5,9 +5,15 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from timeliner import (BodyfileParser, KeywordHighlighter, TimelineEntry,
-                       TimelineProcessor, format_datetime, main,
-                       parse_datetime)
+from timeliner import (
+    BodyfileParser,
+    KeywordHighlighter,
+    TimelineEntry,
+    TimelineProcessor,
+    format_datetime,
+    main,
+    parse_datetime,
+)
 
 
 @pytest.fixture
@@ -160,6 +166,7 @@ def test_timestamp_ordering(runner, tmp_path):
     input_file.write_text(content)
 
     result = runner.invoke(main, [str(input_file)])
+    print(result.output)
     lines = result.output.splitlines()
     assert "file1" in lines[0]
     assert "file2" in lines[1]
@@ -286,3 +293,79 @@ def test_invalid_bodyfile_format(runner):
     result = runner.invoke(main, input="invalid|format|line\n")
     assert result.exit_code == 0
     assert result.output.strip() == ""
+
+
+import pytest
+from click.testing import CliRunner
+from pathlib import Path
+from timeliner import main
+
+
+@pytest.fixture
+def runner():
+    return CliRunner()
+
+
+def test_utf8_encoded_bodyfile(runner, tmp_path):
+    input_file = tmp_path / "utf8_input.txt"
+    input_file.write_text(
+        "md5|/path/to/file_üñîçødé|0|0|0|0|1024|1623456789|1623456790|1623456791|1623456792\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(main, [str(input_file)])
+    assert result.exit_code == 0
+    assert "file_üñîçødé" in result.output
+
+
+def test_latin1_encoded_bodyfile(runner, tmp_path):
+    input_file = tmp_path / "latin1_input.txt"
+    input_file.write_text(
+        "md5|/path/to/file_áéíóú|0|0|0|0|1024|1623456789|1623456790|1623456791|1623456792\n",
+        encoding="latin-1",
+    )
+
+    result = runner.invoke(main, [str(input_file)])
+    assert result.exit_code == 0
+    assert "file_" in result.output
+
+
+def test_ascii_encoded_bodyfile(runner, tmp_path):
+    input_file = tmp_path / "ascii_input.txt"
+    input_file.write_text(
+        "md5|/path/to/file_ascii|0|0|0|0|1024|1623456789|1623456790|1623456791|1623456792\n",
+        encoding="ascii",
+    )
+
+    result = runner.invoke(main, [str(input_file)])
+    assert result.exit_code == 0
+    assert "file_ascii" in result.output
+
+
+def test_invalid_bytes_in_bodyfile(runner, tmp_path):
+    input_file = tmp_path / "invalid_input.txt"
+    with input_file.open("wb") as f:
+        f.write(
+            b"md5|/path/to/file_\xff\xfe|0|0|0|0|1024|1623456789|1623456790|1623456791|1623456792\n"
+        )
+
+    result = runner.invoke(main, [str(input_file)])
+    assert result.exit_code == 0
+    assert "file_" in result.output  # The invalid bytes should be replaced or ignored
+
+
+def test_mixed_encoding_bodyfile(runner, tmp_path):
+    input_file = tmp_path / "mixed_input.txt"
+    with input_file.open("wb") as f:
+        f.write(
+            b"md5|/path/to/file_utf8_\xc3\xbc|0|0|0|0|1024|1623456789|1623456790|1623456791|1623456792\n"
+        )
+        f.write(
+            b"md5|/path/to/file_latin1_\xe9|0|0|0|0|1024|1623456793|1623456794|1623456795|1623456796\n"
+        )
+
+    result = runner.invoke(main, [str(input_file)])
+    print(result.output.encode("utf-8"))
+    assert result.exit_code == 0
+    assert "file_utf8_" in result.output
+    assert "file_latin1_" in result.output
