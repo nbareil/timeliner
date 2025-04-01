@@ -8,21 +8,20 @@
 
 from __future__ import annotations
 
+import heapq
 import json
 import re
 import sys
+import tempfile
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterator, List, Optional, Pattern, Set
+from typing import BinaryIO, Iterator, List, Optional, Pattern, Set, TextIO
 
 import click
 from colorama import Fore, Style, init
-
-import tempfile
-import heapq
-from typing import BinaryIO, TextIO
 
 # Type aliases
 Timestamp = int
