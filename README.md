@@ -1,6 +1,6 @@
 # timeliner.py
 
-A memory-efficient Python script for processing and analyzing bodyfile timeline data. This tool processes bodyfile format (used in digital forensics) and generates a sorted, filtered, and optionally highlighted timeline output.
+A memory-efficient Python script for processing and analyzing bodyfile timeline data. This tool processes bodyfile format and generates a sorted, filtered, and optionally highlighted timeline output.
 
 *Credit: This script was 90% written by LLM.*
 
@@ -99,7 +99,7 @@ $ timeliner.py --separate day bodyfile.txt
 2023-06-12 15:40:00: .a.. /home/user/document.txt
 --------------------------------------------------
 2023-06-13 09:15:22: m... /var/log/syslog
-2023-06-13 10:30:45: ..c. /etc/hosts```
+2023-06-13 10:30:45: ..c. /etc/hosts
 ```
 
 Show the first field (aka: Show MD5 hashes), this is helpful when you are working on
