@@ -126,7 +126,7 @@ $ timeliner.py --mtime --atime timeline.body
 
 ### Advanced usage
 
-When you are working on tens of bodyfile at the same file, you can modify the MD5 field which is usually empty.
+When you are working on tens of bodyfile at the same file, you can use the MD5 field which is usually empty to put the hostname. For example:
 
 ```
 $ cd uac-hunt-package/
