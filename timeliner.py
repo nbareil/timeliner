@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import sys
@@ -16,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterator, Optional, Set, List, Pattern
+from typing import Iterator, List, Optional, Pattern, Set
 
 import click
 from colorama import Fore, Style, init
@@ -253,11 +252,13 @@ def parse_datetime(dt_str: str) -> datetime:
         f"Time data '{dt_str}' does not match any of the supported formats: {', '.join(DATETIME_FORMATS)}"
     )
 
+
 def process_input_file(path: Optional[Path]) -> Iterator[str]:
     # If no path is provided, use stdin
-    file_obj = '-' if path is None else str(path)
-    with click.open_file(file_obj, 'r', encoding='utf-8', errors='ignore') as f:
+    file_obj = "-" if path is None else str(path)
+    with click.open_file(file_obj, "r", encoding="utf-8", errors="ignore") as f:
         yield from (line.strip() for line in f)
+
 
 def parse_time_range(
     around, since, to, window, **kwargs
@@ -279,6 +280,7 @@ def parse_time_range(
     Returns:
         tuple[Optional[datetime], Optional[datetime]]: The start and end datetimes
     """
+
     def start_of_day(dt: datetime) -> datetime:
         return dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -303,34 +305,55 @@ def parse_time_range(
         until_dt = end_of_day(parse_datetime(to))
     return since_dt, until_dt
 
+
 def get_time_filters(**kwargs) -> Optional[Set[str]]:
     """Get the set of time filters from arguments."""
     filters = {time_type for time_type in TIMESTAMP_TYPES if kwargs.get(time_type)}
     return filters or None
 
+
 @click.command()
-@click.argument('filename', type=click.Path(exists=True, path_type=Path), required=False)
-@click.option('--separate', type=click.Choice(['day', 'week', 'month', 'year']),
-              help='Add separator when crossing specified time period')
-@click.option('--since', help='Filter entries since this date/time (YYYY-MM-DD [HH:MM:SS])')
-@click.option('--to', help='Filter entries up to this date/time (YYYY-MM-DD [HH:MM:SS])')
-@click.option('--around', help='Filter entries around this date/time (YYYY-MM-DD [HH:MM:SS])')
-@click.option('--window', type=int, default=2,
-              help='Number of days before and after for --around (default: 2)')
-@click.option('--show-md5', is_flag=True, help='Show MD5 hash in output')
-@click.option('--jsonl', is_flag=True, help='Output in JSON Lines format')
-@click.option('--highlight-file', type=click.Path(exists=True, path_type=Path),
-              help='File containing keywords to highlight (one per line)')
-@click.option('--case-sensitive', is_flag=True,
-              help='Make keyword highlighting case-sensitive')
-@click.option('--atime', is_flag=True, help='Include atime')
-@click.option('--mtime', is_flag=True, help='Include mtime')
-@click.option('--ctime', is_flag=True, help='Include ctime')
-@click.option('--btime', is_flag=True, help='Include btime')
+@click.argument(
+    "filename", type=click.Path(exists=True, path_type=Path), required=False
+)
+@click.option(
+    "--separate",
+    type=click.Choice(["day", "week", "month", "year"]),
+    help="Add separator when crossing specified time period",
+)
+@click.option(
+    "--since", help="Filter entries since this date/time (YYYY-MM-DD [HH:MM:SS])"
+)
+@click.option(
+    "--to", help="Filter entries up to this date/time (YYYY-MM-DD [HH:MM:SS])"
+)
+@click.option(
+    "--around", help="Filter entries around this date/time (YYYY-MM-DD [HH:MM:SS])"
+)
+@click.option(
+    "--window",
+    type=int,
+    default=2,
+    help="Number of days before and after for --around (default: 2)",
+)
+@click.option("--show-md5", is_flag=True, help="Show MD5 hash in output")
+@click.option("--jsonl", is_flag=True, help="Output in JSON Lines format")
+@click.option(
+    "--highlight-file",
+    type=click.Path(exists=True, path_type=Path),
+    help="File containing keywords to highlight (one per line)",
+)
+@click.option(
+    "--case-sensitive", is_flag=True, help="Make keyword highlighting case-sensitive"
+)
+@click.option("--atime", is_flag=True, help="Include atime")
+@click.option("--mtime", is_flag=True, help="Include mtime")
+@click.option("--ctime", is_flag=True, help="Include ctime")
+@click.option("--btime", is_flag=True, help="Include btime")
 def main(filename: Optional[Path], **kwargs):
     """Process bodyfile and generate timeline."""
     try:
-        if not kwargs['jsonl'] and sys.stdout.isatty():
+        if not kwargs["jsonl"] and sys.stdout.isatty():
             init()
 
         since_dt, until_dt = parse_time_range(**kwargs)
@@ -338,20 +361,19 @@ def main(filename: Optional[Path], **kwargs):
 
         # Setup highlighter
         highlighter = None
-        if kwargs['highlight_file'] and not kwargs['jsonl']:
+        if kwargs["highlight_file"] and not kwargs["jsonl"]:
             highlighter = KeywordHighlighter.from_file(
-                kwargs['highlight_file'],
-                case_sensitive=kwargs['case_sensitive']
+                kwargs["highlight_file"], case_sensitive=kwargs["case_sensitive"]
             )
 
         # Create processor
         processor = TimelineProcessor(
-            separate=kwargs['separate'],
+            separate=kwargs["separate"],
             since=since_dt,
             until=until_dt,
             time_filters=time_filters,
-            show_md5=kwargs['show_md5'],
-            jsonl=kwargs['jsonl'],
+            show_md5=kwargs["show_md5"],
+            jsonl=kwargs["jsonl"],
             highlighter=highlighter,
         )
 
@@ -362,5 +384,6 @@ def main(filename: Optional[Path], **kwargs):
     except Exception as e:
         raise click.ClickException(str(e))
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
