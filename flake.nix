@@ -1,5 +1,5 @@
 {
-  description = "goto.py - A script for managing incident cases";
+  description = "timeliner.py - Browse bodyfile like a champ";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -36,7 +36,7 @@
 
           meta = with pkgs.lib; {
             description = "Timeliner";
-            homepage = "https://github.com/nbareil/timeliner.py";
+            homepage = "https://github.com/nbareil/timeliner";
             license = licenses.mit;
             maintainers = [ "Nicolas Bareil" ];
           };
