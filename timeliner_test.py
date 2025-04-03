@@ -370,3 +370,59 @@ def test_mixed_encoding_bodyfile(runner, tmp_path):
     assert result.exit_code == 0
     assert "file_utf8_" in result.output
     assert "file_latin1_" in result.output
+
+def test_bodyfile_with_leading_escaped_pipes():
+    input_line = r"0|file\|with\|pipes\\|0|0|0|0|9529053861562548261|1331893980|1331893980|1331894001|1264526371"
+    entry = BodyfileParser.parse_line(input_line)
+    print(entry)
+    assert entry is not None
+    assert entry.name == 'file|with|pipes\\'
+
+def test_bodyfile_with_pipes():
+    input_line = r"0|file\|with\|pipes|0|0|0|0|9529053861562548261|1331893980|1331893980|1331894001|1264526371"
+    entry = BodyfileParser.parse_line(input_line)
+    print(entry)
+    assert entry is not None
+    assert entry.name == r"file|with|pipes"
+
+def test_bodyfile_unquoted_field():
+    input_line = r'0|Cissesrv        ImagePath="C:\Program Files\HP\Cissesrv\cissesrv.exe"|0||0|0|0|0|1535229693|0|0'
+    entry = BodyfileParser.parse_line(input_line)
+    print(entry)
+    print(input_line)
+    assert entry is not None
+    assert entry.name == r'Cissesrv        ImagePath="C:\Program Files\HP\Cissesrv\cissesrv.exe"'
+
+def test_buggy_size():
+    input_line = r'0|\\\WINDOWS\Debug\UserMode\ChkAcc.bak (indx)|0|0|0|0|9529053861562548261|1331893980|1331893980|1331894001|1264526371'
+    entry = BodyfileParser.parse_line(input_line)
+    assert entry is not None
+    assert r'\WINDOWS\Debug\UserMode\ChkAcc.bak (indx)' in entry.name
+
+def test_windows_paths():
+    test_cases = [
+        # Simple Windows path
+         ('0|C:\\Windows\\System32\\cmd.exe|0|0|0|0|0|1535229693|0|0|0',
+          'C:\\Windows\\System32\\cmd.exe'),
+
+         # Path with spaces
+         ('0|C:\\Program Files\\Common Files\\file.txt|0|0|0|0|0|1535229693|0|0|0',
+          'C:\\Program Files\\Common Files\\file.txt'),
+
+         # Path with quoted spaces and escaped pipes
+         ('0|"C:\\Program Files\\My App\\file with\\|pipe.txt"|0|0|0|0|0|1535229693|0|0|0',
+          '"C:\\Program Files\\My App\\file with\\|pipe.txt"'),
+
+         # Path with multiple escaped pipes
+         ('0|file\\|with\\|multiple\\|pipes|0|0|0|0|0|1535229693|0|0|0',
+          'file|with|multiple|pipes'),
+
+         # Quoted path with escaped quotes
+         ('0|"C:\\Path with \\"quotes\\"\\file.txt"|0|0|0|0|0|1535229693|0|0|0',
+          '"C:\\Path with \\"quotes\\"\\file.txt"'),
+    ]
+
+    for input_line, expected_name in test_cases:
+        entry = BodyfileParser.parse_line(input_line)
+        assert entry is not None
+        assert entry.name == expected_name

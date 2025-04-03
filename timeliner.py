@@ -110,7 +110,37 @@ class BodyfileParser:
     def parse_line(line: str) -> Optional[TimelineEntry]:
         """Parse a single line of bodyfile format."""
         try:
-            fields = line.strip().split("|")
+            # Split by unescaped pipes
+            fields = []
+            current_field = []
+            escape = False
+            in_quotes = False
+
+            for char in line:
+                if escape:
+                    if not in_quotes and char in ('\\', '|'):  # Only treat \\ and \| as escape sequences
+                        current_field.append(char)
+                    else:
+                        # For other characters after \, keep both the \ and the character
+                        current_field.append('\\')
+                        current_field.append(char)
+                    escape = False
+                elif char == '\\':
+                    escape = True
+                elif char == '"':
+                    in_quotes = not in_quotes
+                    current_field.append(char)
+                elif char == '|' and not escape and not in_quotes:
+                    fields.append(''.join(current_field))
+                    current_field = []
+                else:
+                    if not escape:  # Only append if not in escape sequence
+                        current_field.append(char)
+
+            # Add the last field
+            if current_field:
+                fields.append(''.join(current_field))
+
             if len(fields) != 11:
                 return None
 
@@ -125,7 +155,6 @@ class BodyfileParser:
             )
         except (ValueError, IndexError):
             return None
-
 
 class TimelineProcessor:
     """Processes timeline entries and handles filtering and formatting."""
