@@ -372,8 +372,8 @@ class ChunkedTimelineProcessor(TimelineProcessor):
         time_filters: Set[str],
         since_ts: Optional[int],
         until_ts: Optional[int],
-        jsonl,
-        show_md5,
+        jsonl: Optional[bool],
+        show_md5: Optional[bool],
         sort_output: bool
     ) -> Optional[Path]:
         """Process a chunk of data and write to temporary file."""
