@@ -12,31 +12,20 @@ from __future__ import annotations
 import heapq
 import json
 import re
+import subprocess
 import sys
 import tempfile
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import BinaryIO, Iterator, List, Optional, Pattern, Set, TextIO
 
 import click
-from colorama import Fore, Style, init
-
-
 import psutil
-from concurrent.futures import ProcessPoolExecutor
-from functools import partial
-import heapq
-import json
-import subprocess
-import tempfile
-from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
-from typing import Iterator, List, Optional, Set, TextIO
-
+from colorama import Fore, Style, init
 
 # Type aliases
 Timestamp = int
@@ -259,6 +248,7 @@ def get_period_key(timestamp: Timestamp, period: str) -> str:
     return dt.strftime("%Y")
 
 
+
 def parse_datetime(dt_str: str) -> datetime:
     """Parse a datetime string in various formats."""
     for fmt in DATETIME_FORMATS:
@@ -269,7 +259,6 @@ def parse_datetime(dt_str: str) -> datetime:
     raise click.BadParameter(
         f"Time data '{dt_str}' does not match any of the supported formats: {', '.join(DATETIME_FORMATS)}"
     )
-
 
 class ChunkedTimelineProcessor(TimelineProcessor):
     """Processes timeline entries in chunks using parallel processing."""
@@ -318,7 +307,7 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                         self.until_ts,
                         self.jsonl,
                         self.show_md5,
-                        self.sort_output,
+                        self.sort_output
                     )
                     futures.append(future)
                     current_chunk = []
@@ -336,7 +325,7 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                     self.until_ts,
                     self.jsonl,
                     self.show_md5,
-                    self.sort_output,
+                    self.sort_output
                 )
                 futures.append(future)
 
@@ -372,7 +361,7 @@ class ChunkedTimelineProcessor(TimelineProcessor):
         until_ts: Optional[int],
         jsonl: Optional[bool],
         show_md5: Optional[bool],
-        sort_output: bool,
+        sort_output: bool
     ) -> Optional[Path]:
         """Process a chunk of data and write to temporary file."""
         try:
@@ -382,7 +371,7 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                 until=datetime.fromtimestamp(until_ts) if until_ts else None,
                 jsonl=jsonl,
                 show_md5=show_md5,
-                sort_output=sort_output,
+                sort_output=sort_output
             )
             return processor._process_chunk(chunk)
         except Exception as e:
@@ -395,7 +384,8 @@ class ChunkedTimelineProcessor(TimelineProcessor):
         temp_path = Path(temp_file.name)
 
         try:
-            entries = {}  # Use dict to track unique timestamp+name combinations
+            # Use a dictionary to track unique entries by timestamp and name
+            entries_dict = {}
 
             for line in chunk:
                 entry = BodyfileParser.parse_line(line)
@@ -406,19 +396,20 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                     timestamp = entry.get_timestamp(time_type)
                     if not self._is_timestamp_valid(timestamp):
                         continue
-                    formatted = self._format_line(timestamp, entry)
-                    # Use timestamp and formatted line as key to prevent duplicates
-                    key = (timestamp, formatted)
-                    entries[key] = (timestamp, formatted)
 
+                    formatted = self._format_line(timestamp, entry)
+                    # Use both timestamp and name as key to ensure stable sorting
+                    key = (timestamp, entry.name)
+                    entries_dict[key] = (timestamp, formatted)
+
+            # Convert to list and sort
+            entries = list(entries_dict.values())
             if self.sort_output:
-                # Convert dict values to list and sort
-                sorted_entries = sorted(entries.values(), key=lambda x: x[0])
-                for timestamp, formatted in sorted_entries:
-                    temp_file.write(f"{timestamp}|{formatted}\n")
-            else:
-                for timestamp, formatted in entries.values():
-                    temp_file.write(f"{timestamp}|{formatted}\n")
+                entries.sort()  # Sort by timestamp
+
+            # Write sorted entries
+            for timestamp, formatted in entries:
+                temp_file.write(f"{timestamp}|{formatted}\n")
 
             temp_file.close()
             return temp_path
@@ -429,54 +420,49 @@ class ChunkedTimelineProcessor(TimelineProcessor):
             return None
 
     def _sort_and_merge(self, temp_files: List[Path]) -> Iterator[str]:
-        """Sort and merge temporary files using system sort command."""
+        """Sort and merge temporary files using Python sorting."""
         if not temp_files:
             return
 
+        heap = []
+        file_handles = []
+
         try:
-            # Create final merged and sorted file
-            output_file = tempfile.NamedTemporaryFile(mode="w+", delete=False)
-            self.temp_files.append(Path(output_file.name))
-            output_file.close()
-
-            # Prepare sort command
-            sort_cmd = [
-                "sort",
-                "-n",  # Numeric sort
-                "-m",  # Merge only (files are already sorted)
-                "-t",
-                "|",  # Field separator
-                "-k",
-                "1,1",  # Sort by first field (timestamp)
-                "-o",
-                output_file.name,  # Output file
-                *[str(f) for f in temp_files],  # Input files
-            ]
-
-            # Run sort command
-            subprocess.run(sort_cmd, check=True)
-
-            # Read and yield results
-            last_period = None
-            with open(output_file.name, "r") as f:
-                for line in f:
-                    # Split timestamp and formatted entry
+            # Open all files and initialize the heap
+            for temp_file in temp_files:
+                fh = open(temp_file, "r")
+                file_handles.append(fh)
+                line = fh.readline()
+                if line:
                     timestamp, formatted = line.strip().split("|", 1)
-                    timestamp = int(timestamp)
+                    # Add file name to the heap entry for stable sorting
+                    name = formatted.split('/')[-1]  # Extract filename from formatted output
+                    heapq.heappush(heap, (int(timestamp), name, formatted, fh))
 
-                    # Handle period separation
-                    if self.separate and not self.jsonl:
-                        current_period = get_period_key(timestamp, self.separate)
-                        if last_period is not None and current_period != last_period:
-                            yield SEPARATOR
-                        last_period = current_period
+            last_period = None
+            while heap:
+                timestamp, name, formatted, fh = heapq.heappop(heap)
 
-                    yield formatted
+                if self.separate and not self.jsonl:
+                    current_period = get_period_key(timestamp, self.separate)
+                    if last_period is not None and current_period != last_period:
+                        yield SEPARATOR
+                    last_period = current_period
 
-        except subprocess.CalledProcessError as e:
-            print(f"Error during sort: {e}", file=sys.stderr)
-        except Exception as e:
-            print(f"Error processing sorted results: {e}", file=sys.stderr)
+                yield formatted
+
+                line = fh.readline()
+                if line:
+                    timestamp, formatted = line.strip().split("|", 1)
+                    name = formatted.split('/')[-1]
+                    heapq.heappush(heap, (int(timestamp), name, formatted, fh))
+
+        finally:
+            for fh in file_handles:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
 
     def _cat_files(self, temp_files: List[Path]) -> Iterator[str]:
         """Concatenate temporary files without sorting."""
@@ -641,7 +627,6 @@ def main(filename: Optional[Path], **kwargs):
 
     except Exception as e:
         raise click.ClickException(str(e))
-
 
 if __name__ == "__main__":
     main()
