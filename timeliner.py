@@ -452,10 +452,12 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                 yield formatted
 
                 line = fh.readline()
-                if line:
-                    timestamp, formatted = line.strip().split("|", 1)
-                    name = formatted.split('/')[-1]
-                    heapq.heappush(heap, (int(timestamp), name, formatted, fh))
+                if not line:
+                    continue
+
+                timestamp, formatted = line.strip().split("|", 1)
+                name = formatted.split('/')[-1]
+                heapq.heappush(heap, (int(timestamp), name, formatted, fh))
 
         finally:
             for fh in file_handles:
