@@ -209,8 +209,6 @@ class TimelineProcessor:
         """Check if a timestamp is valid and within the specified range."""
         if timestamp == -1:  # Skip invalid timestamps
             return False
-        if timestamp == 0:
-            return False
         if self.since_ts is not None and timestamp < self.since_ts:
             return False
         if self.until_ts is not None and timestamp > self.until_ts:

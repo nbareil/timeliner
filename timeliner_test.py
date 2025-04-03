@@ -283,13 +283,13 @@ def test_no_duplicate(runner):
     print(result.output)
     assert result.exit_code == 0
     assert "/path/to/file1" in result.output
-    assert len(result.output.strip().split("\n")) == 2
+    assert len(result.output.strip().split("\n")) == 3
 
 
 def test_negative_ts(runner):
     result = runner.invoke(
         main,
-        input="0|\\Users\John\Desktop\My Document.docx|291779||0|0|143711|-1|-1|-1|1427897741",
+        input=r"0|\\Users\John\Desktop\My Document.docx|291779||0|0|143711|-1|-1|-1|1427897741",
     )
     print(result.output)
     assert result.exit_code == 0
