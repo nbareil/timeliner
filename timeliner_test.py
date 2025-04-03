@@ -183,6 +183,7 @@ def test_atime_filter(runner, sample_bodyfile):
 def test_jsonl_output(runner, sample_bodyfile):
     result = runner.invoke(main, [str(sample_bodyfile), "--jsonl"])
     assert result.exit_code == 0
+    print(result.output)
     lines = result.output.splitlines()
     for line in lines:
         parsed = json.loads(line)
