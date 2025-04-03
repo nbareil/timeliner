@@ -22,6 +22,7 @@
           propagatedBuildInputs = with pythonPackages; [
             colorama
             click
+            psutil
           ];
 
           nativeBuildInputs = with pythonPackages; [
@@ -51,6 +52,7 @@
             python
             pythonPackages.colorama
             pythonPackages.click
+            pythonPackages.psutil
             pythonPackages.pytest
             pythonPackages.pytest-mock
             pythonPackages.setuptools
