@@ -1,4 +1,4 @@
-#! /usr/bin/env -S uv run
+#! /usr/bin/env -S uv run -q
 # /// script
 # dependencies = [
 #     "colorama",
@@ -274,13 +274,13 @@ class ChunkedTimelineProcessor(TimelineProcessor):
             entry = BodyfileParser.parse_line(line)
             if not entry:
                 continue
-            ts_seen = set()
+            seen = set()
             # Process entry for all requested timestamp types
             for time_type in self.time_filters:
                 timestamp = entry.get_timestamp(time_type)
-                if timestamp not in ts_seen and self._is_timestamp_valid(timestamp):
+                if entry.name not in seen and self._is_timestamp_valid(timestamp):
                     chunk.append((timestamp, entry.name, line))
-                    ts_seen.add(timestamp)
+                    seen.add(entry.name)
 
             if len(chunk) >= self.CHUNK_SIZE:
                 chunk_files.append(self._write_sorted_chunk(chunk))
