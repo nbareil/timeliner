@@ -274,15 +274,17 @@ def test_multiple_time_filters(runner, sample_bodyfile):
     assert "a" in result.output
     assert "m" in result.output
 
+
 def test_no_duplicate(runner):
     result = runner.invoke(
         main,
-        input="XXX|/path/to/file1|66069|-rwxr-xr-x|0|0|56824|1708319813|1708319813|1709111492|0"
+        input="XXX|/path/to/file1|66069|-rwxr-xr-x|0|0|56824|1708319813|1708319813|1709111492|0",
     )
     print(result.output)
     assert result.exit_code == 0
     assert "/path/to/file1" in result.output
-    assert len(result.output.strip().split('\n')) == 2
+    assert len(result.output.strip().split("\n")) == 2
+
 
 def test_stdin_input(runner):
     result = runner.invoke(
@@ -303,6 +305,7 @@ def test_invalid_bodyfile_format(runner):
     result = runner.invoke(main, input="invalid|format|line\n")
     assert result.exit_code == 0
     assert result.output.strip() == ""
+
 
 def test_utf8_encoded_bodyfile(runner, tmp_path):
     input_file = tmp_path / "utf8_input.txt"

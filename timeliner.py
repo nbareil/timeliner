@@ -25,8 +25,6 @@ import click
 from colorama import Fore, Style, init
 
 
-
-
 import psutil
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
@@ -261,7 +259,6 @@ def get_period_key(timestamp: Timestamp, period: str) -> str:
     return dt.strftime("%Y")
 
 
-
 def parse_datetime(dt_str: str) -> datetime:
     """Parse a datetime string in various formats."""
     for fmt in DATETIME_FORMATS:
@@ -272,6 +269,7 @@ def parse_datetime(dt_str: str) -> datetime:
     raise click.BadParameter(
         f"Time data '{dt_str}' does not match any of the supported formats: {', '.join(DATETIME_FORMATS)}"
     )
+
 
 class ChunkedTimelineProcessor(TimelineProcessor):
     """Processes timeline entries in chunks using parallel processing."""
@@ -320,7 +318,7 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                         self.until_ts,
                         self.jsonl,
                         self.show_md5,
-                        self.sort_output
+                        self.sort_output,
                     )
                     futures.append(future)
                     current_chunk = []
@@ -338,7 +336,7 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                     self.until_ts,
                     self.jsonl,
                     self.show_md5,
-                    self.sort_output
+                    self.sort_output,
                 )
                 futures.append(future)
 
@@ -374,7 +372,7 @@ class ChunkedTimelineProcessor(TimelineProcessor):
         until_ts: Optional[int],
         jsonl: Optional[bool],
         show_md5: Optional[bool],
-        sort_output: bool
+        sort_output: bool,
     ) -> Optional[Path]:
         """Process a chunk of data and write to temporary file."""
         try:
@@ -384,7 +382,7 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                 until=datetime.fromtimestamp(until_ts) if until_ts else None,
                 jsonl=jsonl,
                 show_md5=show_md5,
-                sort_output=sort_output
+                sort_output=sort_output,
             )
             return processor._process_chunk(chunk)
         except Exception as e:
@@ -419,7 +417,7 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                 for timestamp, formatted in sorted_entries:
                     temp_file.write(f"{timestamp}|{formatted}\n")
             else:
-                for (timestamp, formatted) in entries.values():
+                for timestamp, formatted in entries.values():
                     temp_file.write(f"{timestamp}|{formatted}\n")
 
             temp_file.close()
@@ -444,12 +442,15 @@ class ChunkedTimelineProcessor(TimelineProcessor):
             # Prepare sort command
             sort_cmd = [
                 "sort",
-                "-n",           # Numeric sort
-                "-m",           # Merge only (files are already sorted)
-                "-t", "|",      # Field separator
-                "-k", "1,1",    # Sort by first field (timestamp)
-                "-o", output_file.name,  # Output file
-                *[str(f) for f in temp_files]  # Input files
+                "-n",  # Numeric sort
+                "-m",  # Merge only (files are already sorted)
+                "-t",
+                "|",  # Field separator
+                "-k",
+                "1,1",  # Sort by first field (timestamp)
+                "-o",
+                output_file.name,  # Output file
+                *[str(f) for f in temp_files],  # Input files
             ]
 
             # Run sort command
@@ -640,6 +641,7 @@ def main(filename: Optional[Path], **kwargs):
 
     except Exception as e:
         raise click.ClickException(str(e))
+
 
 if __name__ == "__main__":
     main()
