@@ -286,6 +286,17 @@ def test_no_duplicate(runner):
     assert len(result.output.strip().split("\n")) == 2
 
 
+def test_negative_ts(runner):
+    result = runner.invoke(
+        main,
+        input="0|\\Users\John\Desktop\My Document.docx|291779||0|0|143711|-1|-1|-1|1427897741",
+    )
+    print(result.output)
+    assert result.exit_code == 0
+    assert "My Document.docx" in result.output
+    assert len(result.output.strip().split("\n")) == 1
+
+
 def test_stdin_input(runner):
     result = runner.invoke(
         main,
