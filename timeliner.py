@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import uuid
 
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -463,14 +464,15 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                 file_handles.append(fh)
                 line = fh.readline()
                 if line:
+                    unique_id = uuid.uuid4()
                     timestamp, formatted = line.strip().split("|", 1)
                     # Add file name to the heap entry for stable sorting
                     name = formatted.split('/')[-1]  # Extract filename from formatted output
-                    heapq.heappush(heap, (int(timestamp), name, formatted, fh))
+                    heapq.heappush(heap, (int(timestamp), name, formatted, unique_id, fh))
 
             last_period = None
             while heap:
-                timestamp, name, formatted, fh = heapq.heappop(heap)
+                timestamp, name, formatted, unique_id, fh = heapq.heappop(heap)
 
                 if self.separate and not self.jsonl:
                     current_period = get_period_key(timestamp, self.separate)
@@ -486,7 +488,7 @@ class ChunkedTimelineProcessor(TimelineProcessor):
 
                 timestamp, formatted = line.strip().split("|", 1)
                 name = formatted.split('/')[-1]
-                heapq.heappush(heap, (int(timestamp), name, formatted, fh))
+                heapq.heappush(heap, (int(timestamp), name, formatted, unique_id, fh))
 
         finally:
             for fh in file_handles:
