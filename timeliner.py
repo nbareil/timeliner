@@ -233,10 +233,18 @@ def _name_matches(
 
 
 def _timestamp_valid(
-    timestamp: Timestamp, since_ts: Optional[int], until_ts: Optional[int]
+    timestamp: Timestamp,
+    since_ts: Optional[int],
+    until_ts: Optional[int],
+    include_bogus: bool = False,
 ) -> bool:
-    """Check if a timestamp is valid and within the specified range."""
-    if timestamp == -1:  # Skip invalid timestamps
+    """Check if a timestamp is valid and within the specified range.
+
+    Non-positive epochs (<= 0) are "bogus" -- the -1 missing-field sentinel, 0,
+    and negatives all render in the 1970s and are forensic noise. They are
+    dropped by default; pass include_bogus=True (the --bogus flag) to keep them.
+    """
+    if timestamp <= 0 and not include_bogus:
         return False
     if since_ts is not None and timestamp < since_ts:
         return False
@@ -427,11 +435,13 @@ class TimelineProcessor:
         highlighter: Optional[KeywordHighlighter] = None,
         grep_re: Optional[Pattern] = None,
         exclude_re: Optional[Pattern] = None,
+        include_bogus: bool = False,
         stats: Optional[dict] = None,
     ):
         self.separate = separate
         self.since_ts = _boundary_epoch(since)
         self.until_ts = _boundary_epoch(until)
+        self.include_bogus = include_bogus
         # Precomputed string bounds for the cheap pre-reject in the parse loop;
         # None when there is no usable time window (then the loop is unchanged).
         self._bounds = _make_window_bounds(self.since_ts, self.until_ts)
@@ -477,7 +487,9 @@ class TimelineProcessor:
 
     def _is_timestamp_valid(self, timestamp: Timestamp) -> bool:
         """Check if a timestamp is valid and within the specified range."""
-        return _timestamp_valid(timestamp, self.since_ts, self.until_ts)
+        return _timestamp_valid(
+            timestamp, self.since_ts, self.until_ts, self.include_bogus
+        )
 
     def _format_entries(
         self, entries: dict[tuple[Timestamp, PathStr], TimelineEntry]
@@ -595,6 +607,7 @@ def _process_chunk_worker(
     grep_re: Optional[Pattern],
     exclude_re: Optional[Pattern],
     render: RenderOptions,
+    include_bogus: bool,
 ) -> Optional[str]:
     """Parse, filter, and fully render a chunk into a sorted temp file.
 
@@ -619,7 +632,7 @@ def _process_chunk_worker(
                 continue
             for time_type in filters:
                 timestamp = entry.get_timestamp(time_type)
-                if not _timestamp_valid(timestamp, since_ts, until_ts):
+                if not _timestamp_valid(timestamp, since_ts, until_ts, include_bogus):
                     continue
                 key = (timestamp, entry.name)
                 if key not in records:
@@ -690,6 +703,7 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                 self.grep_re,
                 self.exclude_re,
                 self.render,
+                self.include_bogus,
             )
             pending[future] = next_index
             next_index += 1
@@ -867,9 +881,21 @@ def parse_time_range(
 
 
 def get_time_filters(**kwargs) -> Optional[Set[str]]:
-    """Get the set of time filters from arguments."""
-    filters = {time_type for time_type in TIMESTAMP_TYPES if kwargs.get(time_type)}
-    return filters or None
+    """Resolve which timestamp types to include from the CLI flags.
+
+    Start from the explicit allow-list (--atime/--mtime/--ctime/--btime) if any
+    were given, else all four; then drop any excluded by --no-atime/--no-mtime/
+    --no-ctime/--no-btime. Returns None when the result is all four (the default,
+    so callers fall back to TIMESTAMP_TYPES). Raises if every type is excluded.
+    """
+    included = {t for t in TIMESTAMP_TYPES if kwargs.get(t)}
+    if not included:
+        included = set(TIMESTAMP_TYPES)
+    excluded = {t for t in TIMESTAMP_TYPES if kwargs.get(f"no_{t}")}
+    result = included - excluded
+    if not result:
+        raise click.BadParameter("all timestamp types were excluded; nothing to show")
+    return result if result != TIMESTAMP_TYPES else None
 
 
 def _compile_regex(pattern: Optional[str], option: str) -> Optional[Pattern]:
@@ -974,10 +1000,20 @@ def run_timeline(stream: Iterator[str], **processor_kwargs) -> Iterator[str]:
     metavar="REGEX",
     help="Exclude entries whose path matches REGEX",
 )
+@click.option(
+    "--bogus",
+    is_flag=True,
+    help="Include bogus timestamps (epoch <= 0, i.e. resolving to 1970); "
+    "hidden by default",
+)
 @click.option("--atime", is_flag=True, help="Include atime")
 @click.option("--mtime", is_flag=True, help="Include mtime")
 @click.option("--ctime", is_flag=True, help="Include ctime")
 @click.option("--btime", is_flag=True, help="Include btime")
+@click.option("--no-atime", is_flag=True, help="Exclude atime")
+@click.option("--no-mtime", is_flag=True, help="Exclude mtime")
+@click.option("--no-ctime", is_flag=True, help="Exclude ctime")
+@click.option("--no-btime", is_flag=True, help="Exclude btime")
 def main(filenames: tuple, output, stats: bool, **kwargs):
     """Process bodyfile(s) and generate timeline.
 
@@ -1022,6 +1058,7 @@ def main(filenames: tuple, output, stats: bool, **kwargs):
             highlighter=highlighter,
             grep_re=grep_re,
             exclude_re=exclude_re,
+            include_bogus=kwargs["bogus"],
             stats=stats_acc,
         )
         for line in lines:

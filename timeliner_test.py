@@ -490,13 +490,18 @@ def test_multiple_time_filters(runner, sample_bodyfile):
 
 
 def test_no_duplicate(runner):
-    result = runner.invoke(
-        main,
-        input="XXX|/path/to/file1|66069|-rwxr-xr-x|0|0|56824|1708319813|1708319813|1709111492|0",
-    )
+    # atime==mtime collapse to one row; btime==0 is bogus and hidden by default,
+    # leaving the merged m/a row and the distinct ctime row -> 2 lines.
+    line = "XXX|/path/to/file1|66069|-rwxr-xr-x|0|0|56824|1708319813|1708319813|1709111492|0"
+    result = runner.invoke(main, input=line)
     print(result.output)
     assert result.exit_code == 0
     assert "/path/to/file1" in result.output
+    assert len(result.output.strip().split("\n")) == 2
+
+    # With --bogus the btime==0 row reappears -> 3 lines.
+    result = runner.invoke(main, ["--bogus"], input=line)
+    assert result.exit_code == 0
     assert len(result.output.strip().split("\n")) == 3
 
 
@@ -884,3 +889,71 @@ def test_separate_invalid_value_rejected(runner, sample_bodyfile):
     result = runner.invoke(main, [str(sample_bodyfile), "--separate", "bogus"])
     assert result.exit_code != 0
     assert "not one of" in result.output
+
+
+# --- --bogus (1970s/epoch<=0 timestamps) -----------------------------------
+
+
+def test_bogus_timestamps_hidden_by_default(runner):
+    # atime=0 (bogus), the other three are valid: 0 is dropped by default.
+    line = "md5|/bog/file|0|0|0|0|1024|0|1708319813|1709111492|1709200000"
+    result = runner.invoke(main, input=line)
+    assert result.exit_code == 0
+    assert "/bog/file" in result.output
+    assert "1970" not in result.output
+
+
+def test_bogus_flag_includes_them(runner):
+    line = "md5|/bog/file|0|0|0|0|1024|0|1708319813|1709111492|1709200000"
+    result = runner.invoke(main, ["--bogus"], input=line)
+    assert result.exit_code == 0
+    assert "1970-01-01" in result.output  # the epoch-0 atime row now shows
+
+
+def test_bogus_negative_also_hidden(runner):
+    # The -1 missing-field sentinel is bogus too; only the valid btime shows.
+    line = r"0|/x/doc|291779||0|0|143711|-1|-1|-1|1427897741"
+    default = runner.invoke(main, input=line)
+    assert default.exit_code == 0
+    assert len(default.output.strip().split("\n")) == 1
+    # --bogus surfaces the -1 rows (they render in 1969/1970).
+    withbog = runner.invoke(main, ["--bogus"], input=line)
+    assert withbog.exit_code == 0
+    assert len(withbog.output.strip().split("\n")) > 1
+
+
+# --- --no-atime / --no-mtime / ... -----------------------------------------
+
+
+def test_no_atime_excludes_atime(runner):
+    # All four times distinct so each yields its own MACB row.
+    line = "md5|/x/f|0|0|0|0|1024|1700000000|1700000001|1700000002|1700000003"
+    full = runner.invoke(main, input=line)
+    assert len(full.output.strip().split("\n")) == 4
+    no_a = runner.invoke(main, ["--no-atime"], input=line)
+    assert no_a.exit_code == 0
+    lines = no_a.output.strip().split("\n")
+    assert len(lines) == 3
+    assert not any(".a.." in ln or "macb" in ln for ln in lines)
+
+
+def test_no_flags_combine(runner):
+    line = "md5|/x/f|0|0|0|0|1024|1700000000|1700000001|1700000002|1700000003"
+    result = runner.invoke(main, ["--no-atime", "--no-ctime"], input=line)
+    assert result.exit_code == 0
+    assert len(result.output.strip().split("\n")) == 2  # only mtime + btime
+
+
+def test_no_flag_overrides_explicit_include(runner):
+    # --mtime asks for mtime, --no-mtime removes it -> nothing left -> error.
+    line = "md5|/x/f|0|0|0|0|1024|1700000000|1700000001|1700000002|1700000003"
+    result = runner.invoke(main, ["--mtime", "--no-mtime"], input=line)
+    assert result.exit_code != 0
+
+
+def test_all_types_excluded_errors(runner):
+    line = "md5|/x/f|0|0|0|0|1024|1700000000|1700000001|1700000002|1700000003"
+    result = runner.invoke(
+        main, ["--no-atime", "--no-mtime", "--no-ctime", "--no-btime"], input=line
+    )
+    assert result.exit_code != 0

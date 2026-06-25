@@ -9,7 +9,10 @@ A memory-efficient Python script for processing and analyzing bodyfile timeline 
 - Process (large) bodyfile format timelines with minimal memory usage
   (small inputs run in-process; large ones are chunked across CPU cores)
 - Merge multiple bodyfiles (and globs) into one globally-sorted timeline
-- Filter entries by timestamp types (atime, mtime, ctime, btime)
+- Filter entries by timestamp types: include with `--atime`/`--mtime`/`--ctime`/
+  `--btime`, or exclude with `--no-atime`/`--no-mtime`/`--no-ctime`/`--no-btime`
+- Bogus timestamps (epoch <= 0, i.e. resolving to 1970) are hidden by default;
+  pass `--bogus` to include them
 - Date range filtering with `--since`/`--after`, `--to`/`--before`, and
   `--around` (full-day when a date is given, exact when a time is given)
 - Path filtering with `--grep` / `--exclude` regexes
@@ -68,10 +71,16 @@ Options:
   --grep REGEX                    Only include entries whose path matches
                                   REGEX
   --exclude REGEX                 Exclude entries whose path matches REGEX
+  --bogus                         Include bogus timestamps (epoch <= 0, i.e.
+                                  resolving to 1970); hidden by default
   --atime                         Include atime
   --mtime                         Include mtime
   --ctime                         Include ctime
   --btime                         Include btime
+  --no-atime                      Exclude atime
+  --no-mtime                      Exclude mtime
+  --no-ctime                      Exclude ctime
+  --no-btime                      Exclude btime
   --help                          Show this message and exit.
 ```
 
@@ -150,6 +159,19 @@ Show only modification and access times:
 
 ```
 $ timeliner.py --mtime --atime timeline.body
+```
+
+Or exclude specific timestamp types (here, everything but ctime):
+
+```
+$ timeliner.py --no-atime --no-mtime --no-btime timeline.body
+```
+
+Bogus timestamps (epoch <= 0, which render in 1970) are hidden by default;
+use `--bogus` to include them:
+
+```
+$ timeliner.py --bogus timeline.body
 ```
 
 Filter by path with regexes (`--grep` keeps matches, `--exclude` drops them;
