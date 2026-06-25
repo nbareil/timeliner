@@ -213,6 +213,17 @@ def _boundary_epoch(dt: Optional[datetime]) -> Optional[int]:
     return int(dt.replace(tzinfo=_DISPLAY_TZ).timestamp())
 
 
+def _name_matches(
+    name: str, grep_re: Optional[Pattern], exclude_re: Optional[Pattern]
+) -> bool:
+    """Apply --grep/--exclude path filters: include must match, exclude must not."""
+    if grep_re is not None and not grep_re.search(name):
+        return False
+    if exclude_re is not None and exclude_re.search(name):
+        return False
+    return True
+
+
 def _timestamp_valid(
     timestamp: Timestamp, since_ts: Optional[int], until_ts: Optional[int]
 ) -> bool:
@@ -277,6 +288,8 @@ class TimelineProcessor:
         show_md5: bool = False,
         jsonl: bool = False,
         highlighter: Optional[KeywordHighlighter] = None,
+        grep_re: Optional[Pattern] = None,
+        exclude_re: Optional[Pattern] = None,
     ):
         self.separate = separate
         self.since_ts = _boundary_epoch(since)
@@ -285,6 +298,8 @@ class TimelineProcessor:
         self.show_md5 = show_md5
         self.jsonl = jsonl
         self.highlighter = highlighter
+        self.grep_re = grep_re
+        self.exclude_re = exclude_re
 
     def process_stream(self, stream: Iterator[str]) -> Iterator[str]:
         """Process a stream of bodyfile lines and yield formatted output lines."""
@@ -306,6 +321,8 @@ class TimelineProcessor:
         )
 
         for entry in valid_entries:
+            if not _name_matches(entry.name, self.grep_re, self.exclude_re):
+                continue
             for time_type in self.time_filters:
                 timestamp = entry.get_timestamp(time_type)
                 if self._is_timestamp_valid(timestamp):
@@ -399,6 +416,8 @@ def _process_chunk_worker(
     time_filters: Optional[Set[str]],
     since_ts: Optional[int],
     until_ts: Optional[int],
+    grep_re: Optional[Pattern] = None,
+    exclude_re: Optional[Pattern] = None,
 ) -> Optional[str]:
     """Parse and filter a chunk, writing sorted intermediate records to a temp file.
 
@@ -414,6 +433,8 @@ def _process_chunk_worker(
         for line in chunk:
             entry = BodyfileParser.parse_line(line)
             if entry is None:
+                continue
+            if not _name_matches(entry.name, grep_re, exclude_re):
                 continue
             for time_type in filters:
                 timestamp = entry.get_timestamp(time_type)
@@ -481,6 +502,8 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                 self.time_filters,
                 self.since_ts,
                 self.until_ts,
+                self.grep_re,
+                self.exclude_re,
             )
             pending[future] = next_index
             next_index += 1
@@ -630,6 +653,16 @@ def get_time_filters(**kwargs) -> Optional[Set[str]]:
     return filters or None
 
 
+def _compile_regex(pattern: Optional[str], option: str) -> Optional[Pattern]:
+    """Compile a user-supplied regex, raising a clean error on bad syntax."""
+    if not pattern:
+        return None
+    try:
+        return re.compile(pattern)
+    except re.error as e:
+        raise click.BadParameter(f"Invalid {option} regex: {e}")
+
+
 def run_timeline(stream: Iterator[str], **processor_kwargs) -> Iterator[str]:
     """Dispatch to the in-process or chunked processor based on input size.
 
@@ -690,6 +723,18 @@ def run_timeline(stream: Iterator[str], **processor_kwargs) -> Iterator[str]:
 @click.option(
     "--case-sensitive", is_flag=True, help="Make keyword highlighting case-sensitive"
 )
+@click.option(
+    "--grep",
+    "grep",
+    metavar="REGEX",
+    help="Only include entries whose path matches REGEX",
+)
+@click.option(
+    "--exclude",
+    "exclude",
+    metavar="REGEX",
+    help="Exclude entries whose path matches REGEX",
+)
 @click.option("--atime", is_flag=True, help="Include atime")
 @click.option("--mtime", is_flag=True, help="Include mtime")
 @click.option("--ctime", is_flag=True, help="Include ctime")
@@ -714,6 +759,9 @@ def main(filename: Optional[Path], **kwargs):
                 kwargs["highlight_file"], case_sensitive=kwargs["case_sensitive"]
             )
 
+        grep_re = _compile_regex(kwargs["grep"], "--grep")
+        exclude_re = _compile_regex(kwargs["exclude"], "--exclude")
+
         # Process and output (in-process for small inputs, chunked for large)
         lines = run_timeline(
             process_input_file(filename),
@@ -724,6 +772,8 @@ def main(filename: Optional[Path], **kwargs):
             show_md5=kwargs["show_md5"],
             jsonl=kwargs["jsonl"],
             highlighter=highlighter,
+            grep_re=grep_re,
+            exclude_re=exclude_re,
         )
         for line in lines:
             click.echo(line)

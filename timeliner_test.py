@@ -308,6 +308,53 @@ def test_show_md5(runner, sample_bodyfile):
     assert "md5" in result.output
 
 
+@pytest.fixture
+def grep_bodyfile(tmp_path):
+    content = "\n".join(
+        [
+            "md5|/var/log/auth.log|0|0|0|0|1024|1623456789|1623456789|1623456789|1623456789",
+            "md5|/etc/passwd|0|0|0|0|1024|1623456790|1623456790|1623456790|1623456790",
+            "md5|/home/user/notes.txt|0|0|0|0|1024|1623456791|1623456791|1623456791|1623456791",
+        ]
+    )
+    input_file = tmp_path / "grep.txt"
+    input_file.write_text(content)
+    return input_file
+
+
+def test_grep_include(runner, grep_bodyfile):
+    result = runner.invoke(main, [str(grep_bodyfile), "--grep", r"\.log$"])
+    assert result.exit_code == 0
+    assert "/var/log/auth.log" in result.output
+    assert "/etc/passwd" not in result.output
+    assert "/home/user/notes.txt" not in result.output
+
+
+def test_exclude(runner, grep_bodyfile):
+    result = runner.invoke(main, [str(grep_bodyfile), "--exclude", "/etc/"])
+    assert result.exit_code == 0
+    assert "/etc/passwd" not in result.output
+    assert "/var/log/auth.log" in result.output
+    assert "/home/user/notes.txt" in result.output
+
+
+def test_grep_and_exclude_combined(runner, grep_bodyfile):
+    # Include anything under /var or /home, but exclude .txt files.
+    result = runner.invoke(
+        main, [str(grep_bodyfile), "--grep", "/(var|home)/", "--exclude", r"\.txt$"]
+    )
+    assert result.exit_code == 0
+    assert "/var/log/auth.log" in result.output
+    assert "/home/user/notes.txt" not in result.output
+    assert "/etc/passwd" not in result.output
+
+
+def test_grep_invalid_regex(runner, grep_bodyfile):
+    result = runner.invoke(main, [str(grep_bodyfile), "--grep", "["])
+    assert result.exit_code != 0
+    assert "Error" in result.output
+
+
 # Regression test for the highlighter being dead in the chunked code path:
 # highlighting is now applied at the parent emit step, so it works regardless
 # of tty (the ANSI codes are literal strings independent of colorama.init()).
