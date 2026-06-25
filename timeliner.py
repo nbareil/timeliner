@@ -562,22 +562,25 @@ def process_input_file(path: Optional[Path]) -> Iterator[str]:
         yield from (line.strip() for line in f)
 
 
+def _has_time_component(dt_str: str) -> bool:
+    """Return True if the date string includes a time-of-day (HH:MM[:SS])."""
+    return ":" in dt_str
+
+
 def parse_time_range(
     around, since, to, window, **kwargs
 ) -> tuple[Optional[datetime], Optional[datetime]]:
     """
-    Parse and return the time range from arguments, using full days.
+    Parse and return the time range from arguments.
 
-    For --around:
-        - since_dt starts at 00:00:00 of the start day
-        - until_dt ends at 23:59:59 of the end day
+    When only a date is given (YYYY-MM-DD), the boundary is expanded to the full
+    day; when a time is also given (YYYY-MM-DD HH:MM[:SS]), the exact time is
+    used:
 
-    For --since/--to:
-        - since_dt starts at 00:00:00 of the specified day
-        - until_dt ends at 23:59:59 of the specified day
-
-    Args:
-        args: Command line arguments containing since, to, around, and window parameters
+    For --since: start of day if date-only, else the exact time.
+    For --to:    end of day if date-only, else the exact time.
+    For --around: window days around the center; full days if date-only, else
+                  exactly ``window`` days before/after the given time.
 
     Returns:
         tuple[Optional[datetime], Optional[datetime]]: The start and end datetimes
@@ -591,9 +594,10 @@ def parse_time_range(
 
     if around:
         center_dt = parse_datetime(around)
-        # Start at beginning of the day, window days before
+        if _has_time_component(around):
+            return center_dt - timedelta(days=window), center_dt + timedelta(days=window)
+        # Date-only: full days, window days before/after.
         since_dt = start_of_day(center_dt - timedelta(days=window))
-        # End at end of the day, window days after
         until_dt = end_of_day(center_dt + timedelta(days=window))
         return since_dt, until_dt
 
@@ -601,10 +605,12 @@ def parse_time_range(
     until_dt = None
 
     if since:
-        since_dt = start_of_day(parse_datetime(since))
+        parsed = parse_datetime(since)
+        since_dt = parsed if _has_time_component(since) else start_of_day(parsed)
 
     if to:
-        until_dt = end_of_day(parse_datetime(to))
+        parsed = parse_datetime(to)
+        until_dt = parsed if _has_time_component(to) else end_of_day(parsed)
     return since_dt, until_dt
 
 

@@ -202,6 +202,44 @@ def test_time_range_since_until_full_days(runner, tmp_path):
     assert "/path/to/file3" not in result.output
 
 
+def test_since_with_time_component(runner, tmp_path):
+    # --since with HH:MM:SS must use the exact time, not the start of day.
+    content = "\n".join(
+        [
+            # 2024-02-03 11:59:59 UTC
+            "md5|/path/before|0|0|0|0|1024|1706961599|1706961599|1706961599|1706961599",
+            # 2024-02-03 12:00:01 UTC
+            "md5|/path/after|0|0|0|0|1024|1706961601|1706961601|1706961601|1706961601",
+        ]
+    )
+    input_file = tmp_path / "since_time.txt"
+    input_file.write_text(content)
+
+    result = runner.invoke(main, [str(input_file), "--since", "2024-02-03 12:00:00"])
+    assert result.exit_code == 0
+    assert "/path/before" not in result.output
+    assert "/path/after" in result.output
+
+
+def test_to_with_time_component(runner, tmp_path):
+    # --to with HH:MM:SS must use the exact time, not the end of day.
+    content = "\n".join(
+        [
+            # 2024-02-03 11:59:59 UTC
+            "md5|/path/before|0|0|0|0|1024|1706961599|1706961599|1706961599|1706961599",
+            # 2024-02-03 13:00:00 UTC
+            "md5|/path/after|0|0|0|0|1024|1706965200|1706965200|1706965200|1706965200",
+        ]
+    )
+    input_file = tmp_path / "to_time.txt"
+    input_file.write_text(content)
+
+    result = runner.invoke(main, [str(input_file), "--to", "2024-02-03 12:00:00"])
+    assert result.exit_code == 0
+    assert "/path/before" in result.output
+    assert "/path/after" not in result.output
+
+
 def test_timestamp_ordering(runner, tmp_path):
     content = "\n".join(
         [
