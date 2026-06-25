@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import glob
 import heapq
 import json
 import os
@@ -290,6 +291,7 @@ class TimelineProcessor:
         highlighter: Optional[KeywordHighlighter] = None,
         grep_re: Optional[Pattern] = None,
         exclude_re: Optional[Pattern] = None,
+        stats: Optional[dict] = None,
     ):
         self.separate = separate
         self.since_ts = _boundary_epoch(since)
@@ -300,6 +302,9 @@ class TimelineProcessor:
         self.highlighter = highlighter
         self.grep_re = grep_re
         self.exclude_re = exclude_re
+        # Caller-owned accumulator updated at each emitted row (both paths render
+        # through _format_line in the parent, so the count is exact).
+        self.stats = stats
 
     def process_stream(self, stream: Iterator[str]) -> Iterator[str]:
         """Process a stream of bodyfile lines and yield formatted output lines."""
@@ -353,6 +358,9 @@ class TimelineProcessor:
 
     def _format_line(self, timestamp: Timestamp, entry: TimelineEntry) -> str:
         """Format a single timeline entry."""
+        if self.stats is not None:
+            self._record_stats(timestamp)
+
         macb = self._generate_macb(entry, timestamp)
 
         if self.jsonl:
@@ -368,6 +376,15 @@ class TimelineProcessor:
         if entry.size == 0:
             return f"{Fore.LIGHTBLACK_EX}{base_line}{Style.RESET_ALL}"
         return base_line
+
+    def _record_stats(self, timestamp: Timestamp) -> None:
+        """Accumulate count and time span for the emitted rows."""
+        s = self.stats
+        s["count"] += 1
+        if s["min_ts"] is None or timestamp < s["min_ts"]:
+            s["min_ts"] = timestamp
+        if s["max_ts"] is None or timestamp > s["max_ts"]:
+            s["max_ts"] = timestamp
 
     def _generate_macb(self, entry: TimelineEntry, timestamp: Timestamp) -> str:
         """Generate the MACB string for a timeline entry."""
@@ -588,11 +605,31 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                 pass
 
 
-def process_input_file(path: Optional[Path]) -> Iterator[str]:
-    # If no path is provided, use stdin
-    file_obj = "-" if path is None else str(path)
-    with click.open_file(file_obj, "r", encoding="utf-8", errors="replace") as f:
-        yield from (line.strip() for line in f)
+def resolve_input_paths(filenames: tuple) -> List[str]:
+    """Expand globs and validate literal paths, returning files to read.
+
+    An empty result means read from stdin. A glob that matches nothing is
+    silently dropped; a literal path that does not exist is an error.
+    """
+    resolved: List[str] = []
+    for name in filenames:
+        if any(ch in name for ch in "*?[]"):
+            matches = sorted(glob.glob(name))
+            resolved.extend(matches)
+        else:
+            if not Path(name).exists():
+                raise click.BadParameter(f"File '{name}' does not exist")
+            resolved.append(name)
+    return resolved
+
+
+def process_input_files(filenames: tuple) -> Iterator[str]:
+    """Yield stripped lines from all input files (or stdin if none given)."""
+    paths = resolve_input_paths(filenames)
+    sources = paths or ["-"]  # no files => read stdin
+    for source in sources:
+        with click.open_file(source, "r", encoding="utf-8", errors="replace") as f:
+            yield from (line.strip() for line in f)
 
 
 def _has_time_component(dt_str: str) -> bool:
@@ -683,8 +720,19 @@ def run_timeline(stream: Iterator[str], **processor_kwargs) -> Iterator[str]:
 
 
 @click.command()
-@click.argument(
-    "filename", type=click.Path(exists=True, path_type=Path), required=False
+@click.version_option(version="2.0", prog_name="timeliner.py")
+@click.argument("filenames", nargs=-1, type=click.UNPROCESSED)
+@click.option(
+    "-o",
+    "--output",
+    type=click.File("w"),
+    default="-",
+    help="Write output to a file instead of stdout",
+)
+@click.option(
+    "--stats",
+    is_flag=True,
+    help="Print summary statistics (count, time span) to stderr",
 )
 @click.option(
     "--separate",
@@ -739,10 +787,13 @@ def run_timeline(stream: Iterator[str], **processor_kwargs) -> Iterator[str]:
 @click.option("--mtime", is_flag=True, help="Include mtime")
 @click.option("--ctime", is_flag=True, help="Include ctime")
 @click.option("--btime", is_flag=True, help="Include btime")
-def main(filename: Optional[Path], **kwargs):
-    """Process bodyfile and generate timeline."""
+def main(filenames: tuple, output, stats: bool, **kwargs):
+    """Process bodyfile(s) and generate timeline.
+
+    FILENAMES are bodyfiles to read (globs allowed); reads stdin if none given.
+    """
     try:
-        if not kwargs["jsonl"] and sys.stdout.isatty():
+        if not kwargs["jsonl"] and output.isatty():
             init()
 
         # Set timezone before parsing time ranges so filter boundaries are
@@ -762,9 +813,11 @@ def main(filename: Optional[Path], **kwargs):
         grep_re = _compile_regex(kwargs["grep"], "--grep")
         exclude_re = _compile_regex(kwargs["exclude"], "--exclude")
 
+        stats_acc = {"count": 0, "min_ts": None, "max_ts": None} if stats else None
+
         # Process and output (in-process for small inputs, chunked for large)
         lines = run_timeline(
-            process_input_file(filename),
+            process_input_files(filenames),
             separate=kwargs["separate"],
             since=since_dt,
             until=until_dt,
@@ -774,12 +827,29 @@ def main(filename: Optional[Path], **kwargs):
             highlighter=highlighter,
             grep_re=grep_re,
             exclude_re=exclude_re,
+            stats=stats_acc,
         )
         for line in lines:
-            click.echo(line)
+            click.echo(line, file=output)
 
-    except Exception as e:
+        if stats_acc is not None:
+            _print_stats(stats_acc)
+
+    except click.ClickException:
+        raise
+    except OSError as e:
         raise click.ClickException(str(e))
+
+
+def _print_stats(stats_acc: dict) -> None:
+    """Print summary statistics to stderr."""
+    count = stats_acc["count"]
+    if count and stats_acc["min_ts"] is not None:
+        span = f"{format_iso(stats_acc['min_ts'])} .. {format_iso(stats_acc['max_ts'])}"
+    else:
+        span = "(none)"
+    click.echo(f"entries: {count}  span: {span}", file=sys.stderr)
+
 
 if __name__ == "__main__":
     main()

@@ -426,6 +426,62 @@ def test_help(runner):
     assert "Options:" in result.output
 
 
+def test_version(runner):
+    result = runner.invoke(main, ["--version"])
+    assert result.exit_code == 0
+    assert "2.0" in result.output
+
+
+def test_output_file(runner, sample_bodyfile, tmp_path):
+    out = tmp_path / "out.txt"
+    result = runner.invoke(main, [str(sample_bodyfile), "-o", str(out)])
+    assert result.exit_code == 0
+    assert result.output.strip() == ""  # nothing on stdout
+    written = out.read_text()
+    assert "/path/to/file1" in written
+    assert "/path/to/file2" in written
+
+
+def test_stats_to_stderr(runner, sample_bodyfile):
+    result = runner.invoke(
+        main, [str(sample_bodyfile), "--stats"], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    # Each of the 3 files has 4 distinct timestamps => 12 emitted rows.
+    assert "entries: 12" in result.output
+    assert "span:" in result.output
+
+
+def test_multiple_inputs(runner, tmp_path):
+    file_a = tmp_path / "a.body"
+    file_a.write_text(
+        "md5|/host_a/file|0|0|0|0|1024|1623456789|1623456789|1623456789|1623456789\n"
+    )
+    file_b = tmp_path / "b.body"
+    file_b.write_text(
+        "md5|/host_b/file|0|0|0|0|1024|1623456000|1623456000|1623456000|1623456000\n"
+    )
+    result = runner.invoke(main, [str(file_a), str(file_b)])
+    assert result.exit_code == 0
+    lines = result.output.strip().split("\n")
+    # Globally sorted across both inputs: host_b (earlier ts) comes first.
+    assert "/host_b/file" in lines[0]
+    assert "/host_a/file" in lines[1]
+
+
+def test_glob_input(runner, tmp_path):
+    (tmp_path / "s1.body").write_text(
+        "md5|/host1/file|0|0|0|0|1024|1623456789|1623456789|1623456789|1623456789\n"
+    )
+    (tmp_path / "s2.body").write_text(
+        "md5|/host2/file|0|0|0|0|1024|1623456790|1623456790|1623456790|1623456790\n"
+    )
+    result = runner.invoke(main, [str(tmp_path / "*.body")])
+    assert result.exit_code == 0
+    assert "/host1/file" in result.output
+    assert "/host2/file" in result.output
+
+
 def test_multiple_time_filters(runner, sample_bodyfile):
     result = runner.invoke(main, [str(sample_bodyfile), "--atime", "--mtime"])
     assert result.exit_code == 0
