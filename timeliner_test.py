@@ -7,6 +7,7 @@ from click.testing import CliRunner
 
 from timeliner import (
     BodyfileParser,
+    ChunkedTimelineProcessor,
     KeywordHighlighter,
     TimelineEntry,
     TimelineProcessor,
@@ -200,8 +201,10 @@ def test_show_md5(runner, sample_bodyfile):
     assert "md5" in result.output
 
 
-# Disabled test because we are checking if we are on a tty, or we disable the coloring
-def disabled_test_highlight_keywords(runner, tmp_path):
+# Regression test for the highlighter being dead in the chunked code path:
+# highlighting is now applied at the parent emit step, so it works regardless
+# of tty (the ANSI codes are literal strings independent of colorama.init()).
+def test_highlight_keywords(runner, tmp_path):
     # Create input file
     input_file = tmp_path / "highlight_test.txt"
     input_file.write_text(
@@ -212,15 +215,15 @@ def disabled_test_highlight_keywords(runner, tmp_path):
     highlight_file = tmp_path / "keywords.txt"
     highlight_file.write_text("test_file")
 
+    # color=True so click.echo does not strip ANSI (it strips on non-tty output).
     result = runner.invoke(
-        main, [str(input_file), "--highlight-file", str(highlight_file)]
+        main, [str(input_file), "--highlight-file", str(highlight_file)], color=True
     )
     assert result.exit_code == 0
     assert "\033[31m" in result.output
 
 
-# Disabled test because we are checking if we are on a tty, or we disable the coloring
-def disabled_test_case_sensitive_highlight(runner, tmp_path):
+def test_case_sensitive_highlight(runner, tmp_path):
     input_file = tmp_path / "case_test.txt"
     input_file.write_text(
         "md5|/path/to/TEST_file1|0|0|0|0|1024|1623456789|1623456790|1623456791|1623456792\n"
@@ -231,7 +234,7 @@ def disabled_test_case_sensitive_highlight(runner, tmp_path):
 
     # Test case-insensitive (default)
     result1 = runner.invoke(
-        main, [str(input_file), "--highlight-file", str(highlight_file)]
+        main, [str(input_file), "--highlight-file", str(highlight_file)], color=True
     )
     assert "\033[31m" in result1.output
 
@@ -239,6 +242,7 @@ def disabled_test_case_sensitive_highlight(runner, tmp_path):
     result2 = runner.invoke(
         main,
         [str(input_file), "--highlight-file", str(highlight_file), "--case-sensitive"],
+        color=True,
     )
     assert "\033[31m" not in result2.output
 
@@ -471,3 +475,48 @@ def test_trailing_empty_field_preserved():
 def test_wrong_field_count_rejected():
     assert BodyfileParser.parse_line("too|few|fields") is None
     assert BodyfileParser.parse_line("md5|/p|0|0|0|0|1024|1|2|3|4|extra") is None
+
+
+def test_cross_chunk_dedup(runner, tmp_path, monkeypatch):
+    # Force a tiny chunk size so the same (timestamp, name) lands in two
+    # different chunks. The merge must collapse the duplicate to one line.
+    monkeypatch.setattr(ChunkedTimelineProcessor, "CHUNK_SIZE", 2)
+    dup = "md5|/path/to/dup|0|0|0|0|1024|1623456789|1623456789|1623456789|1623456789"
+    content = "\n".join(
+        [
+            dup,  # chunk 1
+            "md5|/path/to/x|0|0|0|0|1024|1623456000|1623456000|1623456000|1623456000",
+            dup,  # chunk 2 - same entry again
+            "md5|/path/to/y|0|0|0|0|1024|1623456111|1623456111|1623456111|1623456111",
+            dup,  # chunk 3 - and again
+        ]
+    )
+    input_file = tmp_path / "dup.txt"
+    input_file.write_text(content)
+
+    result = runner.invoke(main, [str(input_file)])
+    assert result.exit_code == 0
+    lines = result.output.strip().split("\n")
+    assert sum("/path/to/dup" in line for line in lines) == 1
+
+
+def test_chunked_path_sorted_deterministic(runner, tmp_path, monkeypatch):
+    # With a tiny chunk size, output must still be globally sorted regardless of
+    # which worker finishes first.
+    monkeypatch.setattr(ChunkedTimelineProcessor, "CHUNK_SIZE", 1)
+    content = "\n".join(
+        [
+            "md5|/path/c|0|0|0|0|1024|1623456791|1623456791|1623456791|1623456791",
+            "md5|/path/a|0|0|0|0|1024|1623456789|1623456789|1623456789|1623456789",
+            "md5|/path/b|0|0|0|0|1024|1623456790|1623456790|1623456790|1623456790",
+        ]
+    )
+    input_file = tmp_path / "order.txt"
+    input_file.write_text(content)
+
+    result = runner.invoke(main, [str(input_file)])
+    assert result.exit_code == 0
+    lines = result.output.strip().split("\n")
+    assert "/path/a" in lines[0]
+    assert "/path/b" in lines[1]
+    assert "/path/c" in lines[2]

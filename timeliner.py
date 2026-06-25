@@ -14,9 +14,8 @@ import os
 import re
 import sys
 import tempfile
-import uuid
 
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import lru_cache, partial
@@ -168,6 +167,57 @@ class BodyfileParser:
 
         return BodyfileParser._build_entry(fields)
 
+def _timestamp_valid(
+    timestamp: Timestamp, since_ts: Optional[int], until_ts: Optional[int]
+) -> bool:
+    """Check if a timestamp is valid and within the specified range."""
+    if timestamp == -1:  # Skip invalid timestamps
+        return False
+    if since_ts is not None and timestamp < since_ts:
+        return False
+    if until_ts is not None and timestamp > until_ts:
+        return False
+    return True
+
+
+def _macb_for(entry: TimelineEntry, timestamp: Timestamp) -> str:
+    """Generate the MACB string for a timeline entry at a given timestamp."""
+    return "".join(
+        "macb"[i] if entry.get_timestamp(t) == timestamp else "."
+        for i, t in enumerate(("mtime", "atime", "ctime", "btime"))
+    )
+
+
+def encode_record(timestamp: Timestamp, entry: TimelineEntry) -> str:
+    """Encode one timeline row as a tab-separated intermediate record.
+
+    The record carries the full entry (all four timestamps) so the parent
+    process can render text or rich JSON identically to the single-process
+    path. Never contains ANSI codes -- coloring/highlighting is applied only
+    at final emit time, so it cannot pollute the sort key.
+    """
+    return (
+        f"{timestamp}\t{entry.atime}\t{entry.mtime}\t{entry.ctime}\t"
+        f"{entry.btime}\t{entry.size}\t{entry.md5}\t{entry.name}"
+    )
+
+
+def decode_record(line: str) -> tuple[Timestamp, TimelineEntry]:
+    """Decode an intermediate record back into (timestamp, entry)."""
+    parts = line.rstrip("\n").split("\t", 7)
+    timestamp = int(parts[0])
+    entry = TimelineEntry(
+        md5=parts[6],
+        name=parts[7],
+        size=int(parts[5]),
+        atime=int(parts[1]),
+        mtime=int(parts[2]),
+        ctime=int(parts[3]),
+        btime=int(parts[4]),
+    )
+    return timestamp, entry
+
+
 class TimelineProcessor:
     """Processes timeline entries and handles filtering and formatting."""
 
@@ -219,13 +269,7 @@ class TimelineProcessor:
 
     def _is_timestamp_valid(self, timestamp: Timestamp) -> bool:
         """Check if a timestamp is valid and within the specified range."""
-        if timestamp == -1:  # Skip invalid timestamps
-            return False
-        if self.since_ts is not None and timestamp < self.since_ts:
-            return False
-        if self.until_ts is not None and timestamp > self.until_ts:
-            return False
-        return True
+        return _timestamp_valid(timestamp, self.since_ts, self.until_ts)
 
     def _format_entries(
         self, entries: dict[tuple[Timestamp, PathStr], TimelineEntry]
@@ -264,10 +308,7 @@ class TimelineProcessor:
 
     def _generate_macb(self, entry: TimelineEntry, timestamp: Timestamp) -> str:
         """Generate the MACB string for a timeline entry."""
-        return "".join(
-            "macb"[i] if entry.get_timestamp(t) == timestamp else "."
-            for i, t in enumerate(["mtime", "atime", "ctime", "btime"])
-        )
+        return _macb_for(entry, timestamp)
 
 
 @lru_cache(maxsize=1024)
@@ -301,206 +342,161 @@ def parse_datetime(dt_str: str) -> datetime:
         f"Time data '{dt_str}' does not match any of the supported formats: {', '.join(DATETIME_FORMATS)}"
     )
 
+def _process_chunk_worker(
+    chunk: List[str],
+    time_filters: Optional[Set[str]],
+    since_ts: Optional[int],
+    until_ts: Optional[int],
+) -> Optional[str]:
+    """Parse and filter a chunk, writing sorted intermediate records to a temp file.
+
+    Runs in a worker process. Emits only ANSI-free intermediate records (no
+    formatting, no MACB text, no color) so the parent owns all presentation and
+    the sort key stays clean. Returns the temp file path, or None on empty/error.
+    """
+    filters = time_filters or TIMESTAMP_TYPES
+    try:
+        # Dedup within the chunk by (timestamp, name); cross-chunk dedup happens
+        # at the merge step. Keep first occurrence for determinism.
+        records: dict[tuple[Timestamp, PathStr], TimelineEntry] = {}
+        for line in chunk:
+            entry = BodyfileParser.parse_line(line)
+            if entry is None:
+                continue
+            for time_type in filters:
+                timestamp = entry.get_timestamp(time_type)
+                if not _timestamp_valid(timestamp, since_ts, until_ts):
+                    continue
+                key = (timestamp, entry.name)
+                if key not in records:
+                    records[key] = entry
+
+        if not records:
+            return None
+
+        temp_file = tempfile.NamedTemporaryFile(
+            mode="w", delete=False, encoding="utf-8", newline=""
+        )
+        try:
+            for timestamp, name in sorted(records):
+                temp_file.write(encode_record(timestamp, records[timestamp, name]) + "\n")
+            temp_file.close()
+            return temp_file.name
+        except Exception:
+            temp_file.close()
+            Path(temp_file.name).unlink(missing_ok=True)
+            raise
+    except Exception as e:  # noqa: BLE001 - report and drop the chunk
+        print(f"Error processing chunk: {e}", file=sys.stderr)
+        return None
+
+
 class ChunkedTimelineProcessor(TimelineProcessor):
-    """Processes timeline entries in chunks using parallel processing."""
+    """Processes timeline entries in chunks using parallel processing.
+
+    Used only for large inputs. Workers parse/filter chunks into sorted,
+    ANSI-free intermediate temp files; the parent k-way merges them, dedups
+    across chunk boundaries, and renders each row with the shared formatter.
+    """
 
     CHUNK_SIZE = 100000  # Number of lines per chunk
     MAX_WORKERS = max(1, (os.cpu_count() or 2) - 1)
 
-    def __init__(self, *args, sort_output: bool = False, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.temp_files = []
-        self.sort_output = sort_output
+        self.temp_files: List[str] = []
 
     def process_stream(self, stream: Iterator[str]) -> Iterator[str]:
-        """Process a stream of bodyfile lines in chunks."""
+        """Process a stream of bodyfile lines in chunks, always sorted."""
         try:
-            # Process chunks in parallel and get temp files
-            temp_files = self._process_chunks_parallel(stream)
-
-            if self.sort_output:
-                # Sort and merge results using system sort
-                yield from self._sort_and_merge(temp_files)
-            else:
-                # Just concatenate the results in order
-                yield from self._cat_files(temp_files)
+            self.temp_files = self._process_chunks_parallel(stream)
+            yield from self._sort_and_merge(self.temp_files)
         finally:
             self._cleanup_temp_files()
 
-    def _process_chunks_parallel(self, stream: Iterator[str]) -> List[Path]:
-        """Process chunks in parallel using ProcessPoolExecutor."""
-        chunk_files = []
-        current_chunk = []
+    def _process_chunks_parallel(self, stream: Iterator[str]) -> List[str]:
+        """Process chunks in parallel, returning temp files in submission order."""
+        results: dict[int, str] = {}
+        pending: dict[Future, int] = {}
+        next_index = 0
+        max_outstanding = self.MAX_WORKERS * 2
 
+        def submit(executor, chunk: List[str]) -> None:
+            nonlocal next_index
+            future = executor.submit(
+                _process_chunk_worker,
+                chunk,
+                self.time_filters,
+                self.since_ts,
+                self.until_ts,
+            )
+            pending[future] = next_index
+            next_index += 1
+
+        def drain_one() -> None:
+            done = next(as_completed(pending))
+            index = pending.pop(done)
+            temp_file = done.result()
+            if temp_file:
+                results[index] = temp_file
+
+        current_chunk: List[str] = []
         with ProcessPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
-            futures = []
-
-            # Read and submit chunks for processing
             for line in stream:
                 current_chunk.append(line)
                 if len(current_chunk) >= self.CHUNK_SIZE:
-                    # Submit chunk for processing
-                    future = executor.submit(
-                        self._process_chunk_wrapper,
-                        current_chunk,
-                        self.time_filters,
-                        self.since_ts,
-                        self.until_ts,
-                        self.jsonl,
-                        self.show_md5,
-                        self.sort_output
-                    )
-                    futures.append(future)
+                    submit(executor, current_chunk)
                     current_chunk = []
+                    # Bound memory: don't let unbounded chunks queue up.
+                    while len(pending) >= max_outstanding:
+                        drain_one()
 
-                    # Check completed futures
-                    self._check_completed_futures(futures, chunk_files)
-
-            # Process last chunk if any
             if current_chunk:
-                future = executor.submit(
-                    self._process_chunk_wrapper,
-                    current_chunk,
-                    self.time_filters,
-                    self.since_ts,
-                    self.until_ts,
-                    self.jsonl,
-                    self.show_md5,
-                    self.sort_output
-                )
-                futures.append(future)
+                submit(executor, current_chunk)
 
-            # Wait for remaining futures
-            for future in futures:
-                temp_file = future.result()
-                if temp_file:
-                    chunk_files.append(temp_file)
-                    self.temp_files.append(temp_file)
+            while pending:
+                drain_one()
 
-        return chunk_files
+        # Order temp files by submission index for deterministic merge input.
+        return [results[i] for i in sorted(results)]
 
-    def _check_completed_futures(self, futures: List[Future], chunk_files: List[Path]):
-        """Check completed futures and collect results."""
-        done = []
-        for future in futures:
-            if future.done():
-                temp_file = future.result()
-                if temp_file:
-                    chunk_files.append(temp_file)
-                    self.temp_files.append(temp_file)
-                done.append(future)
-
-        # Remove completed futures
-        for future in done:
-            futures.remove(future)
-
-    @staticmethod
-    def _process_chunk_wrapper(
-        chunk: List[str],
-        time_filters: Set[str],
-        since_ts: Optional[int],
-        until_ts: Optional[int],
-        jsonl: Optional[bool],
-        show_md5: Optional[bool],
-        sort_output: bool
-    ) -> Optional[Path]:
-        """Process a chunk of data and write to temporary file."""
-        try:
-            processor = ChunkedTimelineProcessor(
-                time_filters=time_filters,
-                since=datetime.fromtimestamp(since_ts) if since_ts else None,
-                until=datetime.fromtimestamp(until_ts) if until_ts else None,
-                jsonl=jsonl,
-                show_md5=show_md5,
-                sort_output=sort_output
-            )
-            return processor._process_chunk(chunk)
-        except Exception as e:
-            print(f"Error processing chunk: {e}", file=sys.stderr)
-            return None
-
-    def _process_chunk(self, chunk: List[str]) -> Optional[Path]:
-        """Process a chunk and write formatted entries to temporary file."""
-        temp_file = tempfile.NamedTemporaryFile(mode="w+", delete=False)
-        temp_path = Path(temp_file.name)
-
-        try:
-            # Use a dictionary to track unique entries by timestamp and name
-            entries_dict = {}
-
-            for line in chunk:
-                entry = BodyfileParser.parse_line(line)
-                if not entry:
-                    continue
-
-                for time_type in self.time_filters:
-                    timestamp = entry.get_timestamp(time_type)
-                    if not self._is_timestamp_valid(timestamp):
-                        continue
-
-                    formatted = self._format_line(timestamp, entry)
-                    # Use both timestamp and name as key to ensure stable sorting
-                    key = (timestamp, entry.name)
-                    entries_dict[key] = (timestamp, formatted)
-
-            # Convert to list and sort
-            entries = list(entries_dict.values())
-            if self.sort_output:
-                entries.sort()  # Sort by timestamp
-
-            # Write sorted entries
-            for timestamp, formatted in entries:
-                temp_file.write(f"{timestamp}|{formatted}\n")
-
-            temp_file.close()
-            return temp_path
-
-        except Exception:
-            temp_file.close()
-            temp_path.unlink()
-            return None
-
-    def _sort_and_merge(self, temp_files: List[Path]) -> Iterator[str]:
-        """Sort and merge temporary files using Python sorting."""
+    def _sort_and_merge(self, temp_files: List[str]) -> Iterator[str]:
+        """K-way merge sorted temp files by (timestamp, name); dedup adjacents."""
         if not temp_files:
             return
 
-        heap = []
+        heap: list = []
         file_handles = []
-
         try:
-            # Open all files and initialize the heap
-            for temp_file in temp_files:
-                fh = open(temp_file, "r")
+            for file_index, temp_file in enumerate(temp_files):
+                fh = open(temp_file, "r", encoding="utf-8")
                 file_handles.append(fh)
                 line = fh.readline()
                 if line:
-                    unique_id = uuid.uuid4()
-                    timestamp, formatted = line.strip().split("|", 1)
-                    # Add file name to the heap entry for stable sorting
-                    name = formatted.split('/')[-1]  # Extract filename from formatted output
-                    heapq.heappush(heap, (int(timestamp), name, formatted, unique_id, fh))
+                    timestamp, entry = decode_record(line)
+                    # file_index is unique per handle, so it breaks ties before
+                    # the (non-comparable) entry is ever reached.
+                    heapq.heappush(heap, (timestamp, entry.name, file_index, entry, fh))
 
             last_period = None
+            last_key = None
             while heap:
-                timestamp, name, formatted, unique_id, fh = heapq.heappop(heap)
+                timestamp, name, file_index, entry, fh = heapq.heappop(heap)
 
-                if self.separate and not self.jsonl:
-                    current_period = get_period_key(timestamp, self.separate)
-                    if last_period is not None and current_period != last_period:
-                        yield SEPARATOR
-                    last_period = current_period
-
-                yield formatted
+                key = (timestamp, name)
+                if key != last_key:
+                    if self.separate and not self.jsonl:
+                        current_period = get_period_key(timestamp, self.separate)
+                        if last_period is not None and current_period != last_period:
+                            yield SEPARATOR
+                        last_period = current_period
+                    yield self._format_line(timestamp, entry)
+                    last_key = key
 
                 line = fh.readline()
-                if not line:
-                    continue
-
-                timestamp, formatted = line.strip().split("|", 1)
-                name = formatted.split('/')[-1]
-                heapq.heappush(heap, (int(timestamp), name, formatted, unique_id, fh))
-
+                if line:
+                    timestamp, entry = decode_record(line)
+                    heapq.heappush(heap, (timestamp, entry.name, file_index, entry, fh))
         finally:
             for fh in file_handles:
                 try:
@@ -508,33 +504,11 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                 except Exception:
                     pass
 
-    def _cat_files(self, temp_files: List[Path]) -> Iterator[str]:
-        """Concatenate temporary files without sorting."""
-        if not temp_files:
-            return
-
-        last_period = None
-        for temp_file in temp_files:
-            with open(temp_file, "r") as f:
-                for line in f:
-                    # Split timestamp and formatted entry
-                    timestamp, formatted = line.strip().split("|", 1)
-                    timestamp = int(timestamp)
-
-                    # Handle period separation
-                    if self.separate and not self.jsonl:
-                        current_period = get_period_key(timestamp, self.separate)
-                        if last_period is not None and current_period != last_period:
-                            yield SEPARATOR
-                        last_period = current_period
-
-                    yield formatted
-
     def _cleanup_temp_files(self):
         """Remove all temporary files."""
         for temp_file in self.temp_files:
             try:
-                temp_file.unlink()
+                Path(temp_file).unlink(missing_ok=True)
             except Exception:
                 pass
 
@@ -636,7 +610,6 @@ def get_time_filters(**kwargs) -> Optional[Set[str]]:
 @click.option("--mtime", is_flag=True, help="Include mtime")
 @click.option("--ctime", is_flag=True, help="Include ctime")
 @click.option("--btime", is_flag=True, help="Include btime")
-@click.option("--no-sort", is_flag=True, help="Do not sort the output by timestamp")
 def main(filename: Optional[Path], **kwargs):
     """Process bodyfile and generate timeline."""
     try:
@@ -653,7 +626,6 @@ def main(filename: Optional[Path], **kwargs):
                 kwargs["highlight_file"], case_sensitive=kwargs["case_sensitive"]
             )
 
-        # Create chunked processor with sort option
         processor = ChunkedTimelineProcessor(
             separate=kwargs["separate"],
             since=since_dt,
@@ -662,7 +634,6 @@ def main(filename: Optional[Path], **kwargs):
             show_md5=kwargs["show_md5"],
             jsonl=kwargs["jsonl"],
             highlighter=highlighter,
-            sort_output=not kwargs["no_sort"],  # Add sort option
         )
 
         # Process and output
