@@ -437,3 +437,37 @@ def test_windows_paths():
         entry = BodyfileParser.parse_line(input_line)
         assert entry is not None
         assert entry.name == expected_name
+
+
+def test_fast_path_no_escapes():
+    # A plain line (no backslash/quote) goes through the fast split path.
+    input_line = "md5|/path/to/file|0|0|0|0|1024|1|2|3|4"
+    entry = BodyfileParser.parse_line(input_line)
+    assert entry is not None
+    assert entry.name == "/path/to/file"
+    assert entry.size == 1024
+    assert (entry.atime, entry.mtime, entry.ctime, entry.btime) == (1, 2, 3, 4)
+
+
+def test_fast_and_escaped_paths_agree():
+    # A line with neither escapes nor quotes must parse identically whether it
+    # goes through the fast path or is forced through the escaped path.
+    input_line = "md5|/path/to/file|0|0|0|0|1024|1|2|3|4"
+    fast = BodyfileParser.parse_line(input_line)
+    slow = BodyfileParser._parse_line_escaped(input_line)
+    assert fast == slow
+
+
+def test_trailing_empty_field_preserved():
+    # A line ending in '|' (empty btime) must still yield 11 fields. The fast
+    # path keeps trailing empties; the escaped path must too. btime is empty,
+    # so it fails int() and the whole line is rejected (rather than silently
+    # losing the field and mis-parsing a 10-field line).
+    assert BodyfileParser.parse_line("md5|/path/to/file|0|0|0|0|1024|1|2|3|") is None
+    # An escaped variant ending in an empty field behaves the same way.
+    assert BodyfileParser._parse_line_escaped(r"md5|/p\|ath|0|0|0|0|1024|1|2|3|") is None
+
+
+def test_wrong_field_count_rejected():
+    assert BodyfileParser.parse_line("too|few|fields") is None
+    assert BodyfileParser.parse_line("md5|/p|0|0|0|0|1024|1|2|3|4|extra") is None

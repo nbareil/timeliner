@@ -108,41 +108,18 @@ class BodyfileParser:
     @staticmethod
     def parse_line(line: str) -> Optional[TimelineEntry]:
         """Parse a single line of bodyfile format."""
+        # Fast path: the common (Linux) bodyfile has no escapes or quotes, so a
+        # plain split is both correct and much faster than the char-by-char scan.
+        if "\\" not in line and '"' not in line:
+            return BodyfileParser._build_entry(line.split("|"))
+        return BodyfileParser._parse_line_escaped(line)
+
+    @staticmethod
+    def _build_entry(fields: List[str]) -> Optional[TimelineEntry]:
+        """Build a TimelineEntry from 11 already-split fields, else None."""
+        if len(fields) != 11:
+            return None
         try:
-            # Split by unescaped pipes
-            fields = []
-            current_field = []
-            escape = False
-            in_quotes = False
-
-            for char in line:
-                if escape:
-                    if not in_quotes and char in ('\\', '|'):  # Only treat \\ and \| as escape sequences
-                        current_field.append(char)
-                    else:
-                        # For other characters after \, keep both the \ and the character
-                        current_field.append('\\')
-                        current_field.append(char)
-                    escape = False
-                elif char == '\\':
-                    escape = True
-                elif char == '"':
-                    in_quotes = not in_quotes
-                    current_field.append(char)
-                elif char == '|' and not escape and not in_quotes:
-                    fields.append(''.join(current_field))
-                    current_field = []
-                else:
-                    if not escape:  # Only append if not in escape sequence
-                        current_field.append(char)
-
-            # Add the last field
-            if current_field:
-                fields.append(''.join(current_field))
-
-            if len(fields) != 11:
-                return None
-
             return TimelineEntry(
                 md5=fields[0],
                 name=fields[1],
@@ -154,6 +131,42 @@ class BodyfileParser:
             )
         except (ValueError, IndexError):
             return None
+
+    @staticmethod
+    def _parse_line_escaped(line: str) -> Optional[TimelineEntry]:
+        """Parse a line that contains escaped pipes or quoted fields."""
+        # Split by unescaped pipes
+        fields = []
+        current_field = []
+        escape = False
+        in_quotes = False
+
+        for char in line:
+            if escape:
+                if not in_quotes and char in ('\\', '|'):  # Only treat \\ and \| as escape sequences
+                    current_field.append(char)
+                else:
+                    # For other characters after \, keep both the \ and the character
+                    current_field.append('\\')
+                    current_field.append(char)
+                escape = False
+            elif char == '\\':
+                escape = True
+            elif char == '"':
+                in_quotes = not in_quotes
+                current_field.append(char)
+            elif char == '|' and not escape and not in_quotes:
+                fields.append(''.join(current_field))
+                current_field = []
+            else:
+                if not escape:  # Only append if not in escape sequence
+                    current_field.append(char)
+
+        # Always append the final field, even when empty (line ending in '|'),
+        # so trailing empty fields are not silently dropped.
+        fields.append(''.join(current_field))
+
+        return BodyfileParser._build_entry(fields)
 
 class TimelineProcessor:
     """Processes timeline entries and handles filtering and formatting."""
