@@ -44,6 +44,52 @@ def test_basic_timeline(runner, sample_bodyfile):
     assert "/path/to/file2" in result.output
 
 
+def test_timezone_default_utc(runner, tmp_path):
+    # 1623456789 == 2021-06-12 00:13:09 UTC. Output must be UTC regardless of
+    # the machine's local timezone.
+    input_file = tmp_path / "tz.txt"
+    input_file.write_text(
+        "md5|/path/to/file|0|0|0|0|1024|1623456789|1623456789|1623456789|1623456789\n"
+    )
+    result = runner.invoke(main, [str(input_file)])
+    assert result.exit_code == 0
+    assert "2021-06-12 00:13:09" in result.output
+
+
+def test_timezone_override(runner, tmp_path):
+    # Same epoch rendered in America/New_York (UTC-4 in June) -> 20:13:09 prior day.
+    input_file = tmp_path / "tz.txt"
+    input_file.write_text(
+        "md5|/path/to/file|0|0|0|0|1024|1623456789|1623456789|1623456789|1623456789\n"
+    )
+    result = runner.invoke(main, [str(input_file), "--tz", "America/New_York"])
+    assert result.exit_code == 0
+    assert "2021-06-11 20:13:09" in result.output
+
+
+def test_timezone_invalid(runner, sample_bodyfile):
+    result = runner.invoke(main, [str(sample_bodyfile), "--tz", "Not/AZone"])
+    assert result.exit_code != 0
+    assert "Error" in result.output
+
+
+def test_timezone_affects_filter_boundary(runner, tmp_path):
+    # 1623456789 == 2021-06-12 02:53:09 UTC, but 2021-06-11 22:53:09 in New York.
+    # A --since of 2021-06-12 (start of day) should INCLUDE it under UTC but
+    # EXCLUDE it under New York (where the event is on the 11th).
+    input_file = tmp_path / "tz.txt"
+    input_file.write_text(
+        "md5|/path/to/file|0|0|0|0|1024|1623456789|1623456789|1623456789|1623456789\n"
+    )
+    utc = runner.invoke(main, [str(input_file), "--since", "2021-06-12"])
+    assert "/path/to/file" in utc.output
+
+    ny = runner.invoke(
+        main, [str(input_file), "--since", "2021-06-12", "--tz", "America/New_York"]
+    )
+    assert "/path/to/file" not in ny.output
+
+
 def test_since_filter(runner, sample_bodyfile):
     result = runner.invoke(main, [str(sample_bodyfile), "--since", "2021-06-12"])
     assert result.exit_code == 0

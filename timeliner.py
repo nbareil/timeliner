@@ -2,7 +2,8 @@
 # /// script
 # dependencies = [
 #     "colorama",
-#     "click"
+#     "click",
+#     "tzdata"
 # ]
 # ///
 
@@ -22,6 +23,7 @@ from functools import lru_cache, partial
 from itertools import chain
 from pathlib import Path
 from typing import BinaryIO, Iterator, List, Optional, Pattern, Set, TextIO
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import click
 from colorama import Fore, Style, init
@@ -40,6 +42,24 @@ SEPARATOR = "-" * 50
 SMALL_INPUT_THRESHOLD = 100000
 DEFAULT_HIGHLIGHT_COLOR = Fore.RED
 HIGHLIGHT_STYLE = Style.BRIGHT
+
+# Display/filter timezone, process-wide. Forensic epochs are UTC; we render and
+# filter in UTC by default and let --tz override. Set once at startup via
+# set_display_tz(); the formatting lru_caches read this global, so it must be
+# cleared whenever the tz changes (only happens at startup).
+_DISPLAY_TZ = ZoneInfo("UTC")
+
+
+def set_display_tz(name: Optional[str]) -> None:
+    """Set the process-wide display/filter timezone (None => UTC)."""
+    global _DISPLAY_TZ
+    try:
+        _DISPLAY_TZ = ZoneInfo(name) if name else ZoneInfo("UTC")
+    except (ZoneInfoNotFoundError, ValueError) as e:
+        raise click.BadParameter(f"Unknown timezone '{name}'") from e
+    format_datetime.cache_clear()
+    format_iso.cache_clear()
+    get_period_key.cache_clear()
 
 
 @dataclass(slots=True, frozen=True)
@@ -171,6 +191,18 @@ class BodyfileParser:
 
         return BodyfileParser._build_entry(fields)
 
+def _boundary_epoch(dt: Optional[datetime]) -> Optional[int]:
+    """Convert a naive wall-clock filter boundary to a UTC epoch.
+
+    Filter datetimes parsed from --since/--to/--around are wall-clock in the
+    display timezone, so attach _DISPLAY_TZ before converting (the old code used
+    naive .timestamp(), which silently assumed the machine's local timezone).
+    """
+    if dt is None:
+        return None
+    return int(dt.replace(tzinfo=_DISPLAY_TZ).timestamp())
+
+
 def _timestamp_valid(
     timestamp: Timestamp, since_ts: Optional[int], until_ts: Optional[int]
 ) -> bool:
@@ -237,8 +269,8 @@ class TimelineProcessor:
         highlighter: Optional[KeywordHighlighter] = None,
     ):
         self.separate = separate
-        self.since_ts = int(since.timestamp()) if since else None
-        self.until_ts = int(until.timestamp()) if until else None
+        self.since_ts = _boundary_epoch(since)
+        self.until_ts = _boundary_epoch(until)
         self.time_filters = time_filters or TIMESTAMP_TYPES
         self.show_md5 = show_md5
         self.jsonl = jsonl
@@ -317,14 +349,20 @@ class TimelineProcessor:
 
 @lru_cache(maxsize=1024)
 def format_datetime(timestamp: Timestamp) -> str:
-    """Format a timestamp as a datetime string."""
-    return datetime.fromtimestamp(timestamp).strftime(DATETIME_FORMATS[0])
+    """Format a timestamp as a datetime string in the display timezone."""
+    return datetime.fromtimestamp(timestamp, tz=_DISPLAY_TZ).strftime(DATETIME_FORMATS[0])
+
+
+@lru_cache(maxsize=1024)
+def format_iso(timestamp: Timestamp) -> str:
+    """Format a timestamp as an offset-aware ISO-8601 string."""
+    return datetime.fromtimestamp(timestamp, tz=_DISPLAY_TZ).isoformat()
 
 
 @lru_cache(maxsize=128)
 def get_period_key(timestamp: Timestamp, period: str) -> str:
     """Generate a period key for timeline separation."""
-    dt = datetime.fromtimestamp(timestamp)
+    dt = datetime.fromtimestamp(timestamp, tz=_DISPLAY_TZ)
     if period == "day":
         return dt.strftime("%Y-%m-%d")
     elif period == "week":
@@ -619,6 +657,13 @@ def run_timeline(stream: Iterator[str], **processor_kwargs) -> Iterator[str]:
     default=2,
     help="Number of days before and after for --around (default: 2)",
 )
+@click.option(
+    "--tz",
+    "--timezone",
+    "tz",
+    metavar="IANA",
+    help="Display/filter timezone (IANA name, e.g. America/New_York). Default: UTC",
+)
 @click.option("--show-md5", is_flag=True, help="Show MD5 hash in output")
 @click.option("--jsonl", is_flag=True, help="Output in JSON Lines format")
 @click.option(
@@ -638,6 +683,10 @@ def main(filename: Optional[Path], **kwargs):
     try:
         if not kwargs["jsonl"] and sys.stdout.isatty():
             init()
+
+        # Set timezone before parsing time ranges so filter boundaries are
+        # interpreted in the display timezone.
+        set_display_tz(kwargs["tz"])
 
         since_dt, until_dt = parse_time_range(**kwargs)
         time_filters = get_time_filters(**kwargs)
