@@ -7,27 +7,44 @@ A memory-efficient Python script for processing and analyzing bodyfile timeline 
 ## Features
 
 - Process (large) bodyfile format timelines with minimal memory usage
+  (small inputs run in-process; large ones are chunked across CPU cores)
+- Merge multiple bodyfiles (and globs) into one globally-sorted timeline
 - Filter entries by timestamp types (atime, mtime, ctime, btime)
-- Date range filtering with `--since`, `--to`, and `--around` options
+- Date range filtering with `--since`, `--to`, and `--around` (full-day when a
+  date is given, exact when a time is given)
+- Path filtering with `--grep` / `--exclude` regexes
 - Timeline separation by day, week, month, or year
-- Keyword highlighting with custom color support
-- JSON Lines output format support
+- Keyword highlighting from a keyword file
+- JSON Lines output with numeric epoch, ISO-8601 timestamp, and all four times
+- Timestamps rendered and filtered in **UTC by default**, overridable with `--tz`
 
 ## Installation
+
+The script is self-contained and runs via [uv](https://docs.astral.sh/uv/);
+the inline script header declares its dependencies, so `./timeliner.py` will
+fetch them on first run.
+
 ### Dependencies
 
 - colorama
 - click
+- tzdata (for `--tz` on minimal systems; UTC needs nothing)
 
-## Features
+## Usage
 
 ```
 $ timeliner.py --help
-Usage: timeliner.py [OPTIONS] [FILENAME]
+Usage: timeliner.py [OPTIONS] [FILENAMES]...
 
-  Process bodyfile and generate timeline.
+  Process bodyfile(s) and generate timeline.
+
+  FILENAMES are bodyfiles to read (globs allowed); reads stdin if none given.
 
 Options:
+  --version                       Show the version and exit.
+  -o, --output FILENAME           Write output to a file instead of stdout
+  --stats                         Print summary statistics (count, time span)
+                                  to stderr
   --separate [day|week|month|year]
                                   Add separator when crossing specified time
                                   period
@@ -39,17 +56,25 @@ Options:
                                   MM-DD [HH:MM:SS])
   --window INTEGER                Number of days before and after for --around
                                   (default: 2)
+  --tz, --timezone IANA           Display/filter timezone (IANA name, e.g.
+                                  America/New_York). Default: UTC
   --show-md5                      Show MD5 hash in output
   --jsonl                         Output in JSON Lines format
   --highlight-file PATH           File containing keywords to highlight (one
                                   per line)
   --case-sensitive                Make keyword highlighting case-sensitive
+  --grep REGEX                    Only include entries whose path matches
+                                  REGEX
+  --exclude REGEX                 Exclude entries whose path matches REGEX
   --atime                         Include atime
   --mtime                         Include mtime
   --ctime                         Include ctime
   --btime                         Include btime
   --help                          Show this message and exit.
 ```
+
+> **Note:** timestamps are shown and filtered in **UTC** by default. Pass
+> `--tz America/New_York` (or any IANA name) to render in another timezone.
 
 ## Usage examples
 ### Basic Processing
@@ -124,6 +149,30 @@ Show only modification and access times:
 $ timeliner.py --mtime --atime timeline.body
 ```
 
+Filter by path with regexes (`--grep` keeps matches, `--exclude` drops them;
+they may be combined):
+
+```
+$ timeliner.py --grep '/var/log/' --exclude '\.gz$' timeline.body
+```
+
+Render in a specific timezone (default is UTC):
+
+```
+$ timeliner.py --tz America/New_York timeline.body
+```
+
+### JSON Lines output
+
+`--jsonl` emits one JSON object per line, carrying both the numeric epoch and
+an offset-aware ISO-8601 timestamp plus all four source timestamps — convenient
+for piping into `jq` or feeding a downstream tool/agent:
+
+```
+$ timeliner.py --jsonl timeline.body | head -1
+{"epoch": 1623456789, "timestamp": "2021-06-12T00:13:09+00:00", "macb": "m...", "name": "/etc/passwd", "size": 1024, "md5": "md5", "atime": 1623456789, "mtime": 1623456789, "ctime": 1623456789, "btime": 1623456789}
+```
+
 ### Advanced usage
 
 When you are working on tens of bodyfile at the same file, you can use the MD5 field which is usually empty to put the hostname. For example:
@@ -156,9 +205,14 @@ serverB
 ...
 $ ls
 serverA serverB serverC
-$ grep '^' */bodyfile/bodyfile.txt |perl -pe 's!/bodyfile/bodyfile.txt:0!!' > master-bodyfile-with-fname.txt
-$ timeliner.py --show-md5 master-bodyfile-with-fname.txt
-$ ./timeline-processor.py --show-md5 bodyfile.txt
+```
+
+After tagging the MD5 field of each host's bodyfile with its hostname, you can
+pass all the bodyfiles (or a glob) directly — they are merged into a single
+globally-sorted timeline:
+
+```
+$ timeliner.py --show-md5 */bodyfile/bodyfile.txt
 2023-11-28 14:23:15: serverA macb /etc/hosts
 2023-11-28 14:25:33: serverA .a.. /var/log/auth.log
 2023-11-28 15:02:44: serverB m... /home/user/.bash_history
