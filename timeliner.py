@@ -79,13 +79,23 @@ class TimelineEntry:
         return getattr(self, time_type)
 
     def to_json_dict(self, timestamp: Timestamp, macb: str) -> dict:
-        """Convert entry to a dictionary suitable for JSON output."""
+        """Convert entry to a dictionary suitable for JSON output.
+
+        Carries both the numeric epoch and an ISO-8601 (offset-aware) string,
+        the full path, and all four source timestamps so a consuming agent does
+        not have to re-parse the human-readable output.
+        """
         return {
-            "timestamp": format_datetime(timestamp),
-            "md5": self.md5,
+            "epoch": timestamp,
+            "timestamp": format_iso(timestamp),
             "macb": macb,
             "name": self.name,
             "size": self.size,
+            "md5": self.md5,
+            "atime": self.atime,
+            "mtime": self.mtime,
+            "ctime": self.ctime,
+            "btime": self.btime,
         }
 
 

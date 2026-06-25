@@ -280,6 +280,28 @@ def test_jsonl_output(runner, sample_bodyfile):
         assert "size" in parsed
 
 
+def test_jsonl_rich_fields(runner, tmp_path):
+    input_file = tmp_path / "rich.txt"
+    input_file.write_text(
+        "md5|/path/to/file|0|0|0|0|1024|1623456789|1623456790|1623456791|1623456792\n"
+    )
+    result = runner.invoke(main, [str(input_file), "--jsonl"])
+    assert result.exit_code == 0
+    obj = json.loads(result.output.splitlines()[0])
+
+    # Numeric epoch is present and an int.
+    assert isinstance(obj["epoch"], int)
+    # All four source timestamps are carried through.
+    for field in ("atime", "mtime", "ctime", "btime"):
+        assert field in obj
+    assert obj["atime"] == 1623456789
+    assert obj["btime"] == 1623456792
+    # The human timestamp is offset-aware ISO-8601 (parseable, has a tzinfo).
+    parsed = datetime.fromisoformat(obj["timestamp"])
+    assert parsed.tzinfo is not None
+    assert obj["name"] == "/path/to/file"
+
+
 def test_show_md5(runner, sample_bodyfile):
     result = runner.invoke(main, [str(sample_bodyfile), "--show-md5"])
     assert result.exit_code == 0
