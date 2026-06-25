@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+import timeliner
 from timeliner import (
     BodyfileParser,
     ChunkedTimelineProcessor,
@@ -478,8 +479,10 @@ def test_wrong_field_count_rejected():
 
 
 def test_cross_chunk_dedup(runner, tmp_path, monkeypatch):
-    # Force a tiny chunk size so the same (timestamp, name) lands in two
-    # different chunks. The merge must collapse the duplicate to one line.
+    # Force the chunked path with a tiny chunk size so the same (timestamp,
+    # name) lands in two different chunks. The merge must collapse the
+    # duplicate to one line.
+    monkeypatch.setattr(timeliner, "SMALL_INPUT_THRESHOLD", 0)
     monkeypatch.setattr(ChunkedTimelineProcessor, "CHUNK_SIZE", 2)
     dup = "md5|/path/to/dup|0|0|0|0|1024|1623456789|1623456789|1623456789|1623456789"
     content = "\n".join(
@@ -503,6 +506,7 @@ def test_cross_chunk_dedup(runner, tmp_path, monkeypatch):
 def test_chunked_path_sorted_deterministic(runner, tmp_path, monkeypatch):
     # With a tiny chunk size, output must still be globally sorted regardless of
     # which worker finishes first.
+    monkeypatch.setattr(timeliner, "SMALL_INPUT_THRESHOLD", 0)
     monkeypatch.setattr(ChunkedTimelineProcessor, "CHUNK_SIZE", 1)
     content = "\n".join(
         [

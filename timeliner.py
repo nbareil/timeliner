@@ -19,6 +19,7 @@ from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import lru_cache, partial
+from itertools import chain
 from pathlib import Path
 from typing import BinaryIO, Iterator, List, Optional, Pattern, Set, TextIO
 
@@ -34,6 +35,9 @@ DATETIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
 TIMESTAMP_TYPES = {"atime", "mtime", "ctime", "btime"}
 MD5_LENGTH = 50
 SEPARATOR = "-" * 50
+# Inputs at or below this many lines are processed in-process (no worker pool
+# or temp files); larger inputs use the chunked/parallel path. Matches one chunk.
+SMALL_INPUT_THRESHOLD = 100000
 DEFAULT_HIGHLIGHT_COLOR = Fore.RED
 HIGHLIGHT_STYLE = Style.BRIGHT
 
@@ -572,6 +576,25 @@ def get_time_filters(**kwargs) -> Optional[Set[str]]:
     return filters or None
 
 
+def run_timeline(stream: Iterator[str], **processor_kwargs) -> Iterator[str]:
+    """Dispatch to the in-process or chunked processor based on input size.
+
+    Buffers up to SMALL_INPUT_THRESHOLD lines: if the input fits, process it
+    in-process (no worker pool or temp files); otherwise hand the buffered head
+    plus the rest of the stream to the chunked/parallel processor.
+    """
+    head: List[str] = []
+    for line in stream:
+        head.append(line)
+        if len(head) > SMALL_INPUT_THRESHOLD:
+            processor = ChunkedTimelineProcessor(**processor_kwargs)
+            yield from processor.process_stream(chain(head, stream))
+            return
+
+    processor = TimelineProcessor(**processor_kwargs)
+    yield from processor.process_stream(iter(head))
+
+
 @click.command()
 @click.argument(
     "filename", type=click.Path(exists=True, path_type=Path), required=False
@@ -626,7 +649,9 @@ def main(filename: Optional[Path], **kwargs):
                 kwargs["highlight_file"], case_sensitive=kwargs["case_sensitive"]
             )
 
-        processor = ChunkedTimelineProcessor(
+        # Process and output (in-process for small inputs, chunked for large)
+        lines = run_timeline(
+            process_input_file(filename),
             separate=kwargs["separate"],
             since=since_dt,
             until=until_dt,
@@ -635,9 +660,7 @@ def main(filename: Optional[Path], **kwargs):
             jsonl=kwargs["jsonl"],
             highlighter=highlighter,
         )
-
-        # Process and output
-        for line in processor.process_stream(process_input_file(filename)):
+        for line in lines:
             click.echo(line)
 
     except Exception as e:
