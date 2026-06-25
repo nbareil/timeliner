@@ -2,7 +2,6 @@
 # /// script
 # dependencies = [
 #     "colorama",
-#     "psutil",
 #     "click"
 # ]
 # ///
@@ -11,8 +10,8 @@ from __future__ import annotations
 
 import heapq
 import json
+import os
 import re
-import subprocess
 import sys
 import tempfile
 import uuid
@@ -25,7 +24,6 @@ from pathlib import Path
 from typing import BinaryIO, Iterator, List, Optional, Pattern, Set, TextIO
 
 import click
-import psutil
 from colorama import Fore, Style, init
 
 # Type aliases
@@ -294,7 +292,7 @@ class ChunkedTimelineProcessor(TimelineProcessor):
     """Processes timeline entries in chunks using parallel processing."""
 
     CHUNK_SIZE = 100000  # Number of lines per chunk
-    MAX_WORKERS = max(1, psutil.cpu_count(logical=True) - 1)
+    MAX_WORKERS = max(1, (os.cpu_count() or 2) - 1)
 
     def __init__(self, *args, sort_output: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
