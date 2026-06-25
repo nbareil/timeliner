@@ -733,3 +733,99 @@ def test_chunked_path_sorted_deterministic(runner, tmp_path, monkeypatch):
     assert "/path/a" in lines[0]
     assert "/path/b" in lines[1]
     assert "/path/c" in lines[2]
+
+
+# --- Time-window pre-filter (--around/--since/--to fast path) ---------------
+
+from timeliner import (  # noqa: E402
+    _make_window_bounds,
+    _provably_outside_window,
+)
+
+
+def _fields(atime, mtime, ctime, btime, name="/x"):
+    """Build the 11 split fields of a bodyfile line with given time strings."""
+    return ["0", name, "0", "0", "0", "0", "100", atime, mtime, ctime, btime]
+
+
+def test_make_window_bounds_none_cases():
+    # No window, and negative boundaries, must disable the cheap path.
+    assert _make_window_bounds(None, None) is None
+    assert _make_window_bounds(-5, -1) is None
+    # A single negative boundary disables only that side.
+    b = _make_window_bounds(-5, 1704240000)
+    assert b is not None and not b.have_since and b.have_until
+    b = _make_window_bounds(1703894400, None)
+    assert b is not None and b.have_since and not b.have_until
+
+
+def test_prefilter_all_fields_outside_is_skippable():
+    b = _make_window_bounds(1703894400, 1704240000)  # ~2024-01-01 window
+    # Every field well below `since` -> provably outside -> safe to skip.
+    assert _provably_outside_window(_fields("100", "100", "100", "100"), b) is True
+    # Every field well above `until` -> also skippable.
+    hi = "9999999999"
+    assert _provably_outside_window(_fields(hi, hi, hi, hi), b) is True
+
+
+def test_prefilter_one_field_in_window_is_kept():
+    b = _make_window_bounds(1703894400, 1704240000)
+    # mtime inside the window -> must NOT be skipped.
+    assert _provably_outside_window(_fields("100", "1703900000", "100", "100"), b) is False
+
+
+def test_prefilter_ambiguous_fields_are_kept():
+    b = _make_window_bounds(1703894400, 1704240000)
+    # Zero-padded, non-digit, negative sentinel, and Unicode-digit fields are
+    # not "clean" -> never skipped (the exact int filter decides downstream).
+    assert _provably_outside_window(_fields("01703900000", "100", "100", "100"), b) is False
+    assert _provably_outside_window(_fields("abc", "100", "100", "100"), b) is False
+    assert _provably_outside_window(_fields("-1", "100", "100", "100"), b) is False
+    assert _provably_outside_window(_fields("²", "100", "100", "100"), b) is False
+    # Wrong field count -> not skippable (let _build_entry reject it).
+    assert _provably_outside_window(["0", "/x", "0"], b) is False
+
+
+def test_prefilter_zero_padded_in_range_is_emitted(runner, tmp_path):
+    # A zero-padded epoch field that is actually IN range must still appear:
+    # the pre-filter must not skip it just because it cannot prove it out.
+    # 1704067200 = 2024-01-01 00:00:00 UTC; padded to 11 chars with a leading 0.
+    content = "md5|/padded/file|0|0|0|0|1024|01704067200|01704067200|01704067200|01704067200"
+    input_file = tmp_path / "padded.txt"
+    input_file.write_text(content)
+    result = runner.invoke(main, [str(input_file), "--around", "2024-01-01"])
+    assert result.exit_code == 0
+    assert "/padded/file" in result.output
+
+
+def test_prefilter_negative_sentinel_with_window(runner, tmp_path):
+    # A line mixing -1 sentinels with one in-window timestamp: the valid time
+    # is emitted, the -1 fields are dropped -- same as without the pre-filter.
+    content = "md5|/mixed/file|0|0|0|0|1024|-1|1704067200|-1|-1"
+    input_file = tmp_path / "mixed.txt"
+    input_file.write_text(content)
+    result = runner.invoke(main, [str(input_file), "--around", "2024-01-01"])
+    assert result.exit_code == 0
+    assert "/mixed/file" in result.output
+    assert len(result.output.strip().split("\n")) == 1
+
+
+def test_prefilter_open_ended_since_and_to(runner, tmp_path):
+    content = "\n".join(
+        [
+            "md5|/past/file|0|0|0|0|1024|1577836800|1577836800|1577836800|1577836800",  # 2020-01-01
+            "md5|/future/file|0|0|0|0|1024|1735689600|1735689600|1735689600|1735689600",  # 2025-01-01
+        ]
+    )
+    input_file = tmp_path / "openended.txt"
+    input_file.write_text(content)
+
+    # --since only: keeps the future row, drops the past row.
+    r = runner.invoke(main, [str(input_file), "--since", "2024-01-01"])
+    assert r.exit_code == 0
+    assert "/future/file" in r.output and "/past/file" not in r.output
+
+    # --to only: keeps the past row, drops the future row.
+    r = runner.invoke(main, [str(input_file), "--to", "2024-01-01"])
+    assert r.exit_code == 0
+    assert "/past/file" in r.output and "/future/file" not in r.output

@@ -245,6 +245,98 @@ def _timestamp_valid(
     return True
 
 
+@dataclass(frozen=True, slots=True)
+class _WindowBounds:
+    """Precomputed string forms of the since/until epoch boundaries.
+
+    Used by the cheap pre-reject in the parse loops: comparing the raw bodyfile
+    time-field strings against these avoids the int() conversions for the lines
+    that a time filter (--around/--since/--to) is going to drop anyway.
+    """
+
+    have_since: bool
+    since_len: int  # len(str(since_ts))
+    since_str: str  # str(since_ts)
+    have_until: bool
+    until_len: int
+    until_str: str
+
+
+def _make_window_bounds(
+    since_ts: Optional[int], until_ts: Optional[int]
+) -> Optional[_WindowBounds]:
+    """Build pre-filter bounds, or None when the cheap path does not apply.
+
+    Returns None when there is no time window at all, so the parse loops behave
+    exactly as before. A negative boundary disables the cheap path on that side
+    (the length/lexical == numeric equivalence only holds for non-negative
+    integers); the exact int filter still applies it.
+    """
+    have_since = since_ts is not None and since_ts >= 0
+    have_until = until_ts is not None and until_ts >= 0
+    if not have_since and not have_until:
+        return None
+    s = str(since_ts) if have_since else ""
+    u = str(until_ts) if have_until else ""
+    return _WindowBounds(have_since, len(s), s, have_until, len(u), u)
+
+
+def _field_clean_digits(s: str) -> bool:
+    """True if s is a non-negative ASCII integer with no leading zero.
+
+    For such strings, numeric ordering equals (length, then lexical) ordering,
+    which is what makes the string pre-reject sound. isascii() rules out exotic
+    Unicode digits (e.g. "²".isdigit() is True but does not order numerically).
+    """
+    return s.isascii() and s.isdigit() and (len(s) == 1 or s[0] != "0")
+
+
+def _provably_outside_window(fields: List[str], bounds: _WindowBounds) -> bool:
+    """True only if every time field is provably outside [since, until].
+
+    Conservative: returns True (safe to skip the line) only when all four time
+    fields are clean digit strings that the (length, lexical) test places
+    outside the window. Anything ambiguous -- non-digit, negative, zero-padded,
+    or possibly in range -- returns False so the line falls through to the exact
+    int filter. Keeping extra lines is always safe; only skipping must be proven.
+    """
+    if len(fields) != 11:
+        return False  # malformed: let _build_entry reject it
+    for i in (7, 8, 9, 10):  # atime, mtime, ctime, btime
+        s = fields[i]
+        if not _field_clean_digits(s):
+            return False
+        below = bounds.have_since and (
+            len(s) < bounds.since_len
+            or (len(s) == bounds.since_len and s < bounds.since_str)
+        )
+        above = bounds.have_until and (
+            len(s) > bounds.until_len
+            or (len(s) == bounds.until_len and s > bounds.until_str)
+        )
+        if not (below or above):
+            return False  # this field is/may be in range -> keep the line
+    return True
+
+
+def _parse_with_prefilter(
+    line: str, bounds: Optional[_WindowBounds]
+) -> Optional[TimelineEntry]:
+    """Parse a line, cheaply skipping lines provably outside the time window.
+
+    Mirrors BodyfileParser.parse_line's fast/escaped dispatch, but on the fast
+    path it reuses the split fields to pre-reject out-of-window lines before the
+    expensive int() conversions in _build_entry. The escaped path and the exact
+    int filter downstream are unchanged.
+    """
+    if "\\" not in line and '"' not in line:
+        fields = line.split("|")
+        if bounds is not None and _provably_outside_window(fields, bounds):
+            return None
+        return BodyfileParser._build_entry(fields)
+    return BodyfileParser._parse_line_escaped(line)
+
+
 def _macb_for(entry: TimelineEntry, timestamp: Timestamp) -> str:
     """Generate the MACB string for a timeline entry at a given timestamp.
 
@@ -340,6 +432,9 @@ class TimelineProcessor:
         self.separate = separate
         self.since_ts = _boundary_epoch(since)
         self.until_ts = _boundary_epoch(until)
+        # Precomputed string bounds for the cheap pre-reject in the parse loop;
+        # None when there is no usable time window (then the loop is unchanged).
+        self._bounds = _make_window_bounds(self.since_ts, self.until_ts)
         self.time_filters = time_filters or TIMESTAMP_TYPES
         self.render = RenderOptions(
             show_md5=show_md5, jsonl=jsonl, highlighter=highlighter
@@ -363,9 +458,10 @@ class TimelineProcessor:
     ) -> dict[tuple[Timestamp, PathStr], TimelineEntry]:
         """Collect and filter timeline entries."""
         entries = {}
+        bounds = self._bounds
         valid_entries = (
             entry
-            for entry in map(BodyfileParser.parse_line, stream)
+            for entry in (_parse_with_prefilter(line, bounds) for line in stream)
             if entry is not None
         )
 
@@ -486,12 +582,15 @@ def _process_chunk_worker(
     precomputed payload. Returns the temp file path, or None on empty/error.
     """
     filters = time_filters or TIMESTAMP_TYPES
+    # Built once per chunk; cheaply skips lines provably outside the time window
+    # before the per-line int() conversions (None when there is no window).
+    bounds = _make_window_bounds(since_ts, until_ts)
     try:
         # Dedup within the chunk by (timestamp, name); cross-chunk dedup happens
         # at the merge step. Keep first occurrence for determinism.
         records: dict[tuple[Timestamp, PathStr], TimelineEntry] = {}
         for line in chunk:
-            entry = BodyfileParser.parse_line(line)
+            entry = _parse_with_prefilter(line, bounds)
             if entry is None:
                 continue
             if not _name_matches(entry.name, grep_re, exclude_re):
