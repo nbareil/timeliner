@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import lru_cache
 from itertools import chain
+from operator import itemgetter
 from pathlib import Path
 from typing import Iterator, List, Optional, Pattern, Set
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -39,8 +40,10 @@ TIMESTAMP_TYPES = {"atime", "mtime", "ctime", "btime"}
 MD5_LENGTH = 50
 SEPARATOR = "-" * 50
 # Inputs at or below this many lines are processed in-process (no worker pool
-# or temp files); larger inputs use the chunked/parallel path. Matches one chunk.
-SMALL_INPUT_THRESHOLD = 100000
+# or temp files); larger inputs use the chunked/parallel path. Set near the
+# measured crossover: below ~30k lines the pool-spawn overhead outweighs the
+# parallelism, above it the chunked path wins (it renders rows on worker cores).
+SMALL_INPUT_THRESHOLD = 30000
 DEFAULT_HIGHLIGHT_COLOR = Fore.RED
 HIGHLIGHT_STYLE = Style.BRIGHT
 
@@ -58,12 +61,16 @@ def set_display_tz(name: Optional[str]) -> None:
         _DISPLAY_TZ = ZoneInfo(name) if name else ZoneInfo("UTC")
     except (ZoneInfoNotFoundError, ValueError) as e:
         raise click.BadParameter(f"Unknown timezone '{name}'") from e
-    format_datetime.cache_clear()
+    # format_datetime reads _DISPLAY_TZ directly (no cache); the others are
+    # lru_cached on (timestamp[, period]) and must be invalidated on tz change.
     format_iso.cache_clear()
     get_period_key.cache_clear()
 
 
-@dataclass(slots=True, frozen=True)
+# Not frozen: entries are never hashed or used as dict keys (keys are
+# (timestamp, name) tuples), and a frozen dataclass forces a slow
+# object.__setattr__ per field in __init__ -- costly at 1.2M+ constructions.
+@dataclass(slots=True)
 class TimelineEntry:
     """Represents a single timeline entry with all its timestamps."""
 
@@ -239,41 +246,78 @@ def _timestamp_valid(
 
 
 def _macb_for(entry: TimelineEntry, timestamp: Timestamp) -> str:
-    """Generate the MACB string for a timeline entry at a given timestamp."""
-    return "".join(
-        "macb"[i] if entry.get_timestamp(t) == timestamp else "."
-        for i, t in enumerate(("mtime", "atime", "ctime", "btime"))
-    )
+    """Generate the MACB string for a timeline entry at a given timestamp.
 
-
-def encode_record(timestamp: Timestamp, entry: TimelineEntry) -> str:
-    """Encode one timeline row as a tab-separated intermediate record.
-
-    The record carries the full entry (all four timestamps) so the parent
-    process can render text or rich JSON identically to the single-process
-    path. Never contains ANSI codes -- coloring/highlighting is applied only
-    at final emit time, so it cannot pollute the sort key.
+    Hot path: built by direct field comparison (no getattr/genexpr) since this
+    runs once per emitted row in both the in-process and chunked-merge paths.
     """
     return (
-        f"{timestamp}\t{entry.atime}\t{entry.mtime}\t{entry.ctime}\t"
-        f"{entry.btime}\t{entry.size}\t{entry.md5}\t{entry.name}"
+        ("m" if entry.mtime == timestamp else ".")
+        + ("a" if entry.atime == timestamp else ".")
+        + ("c" if entry.ctime == timestamp else ".")
+        + ("b" if entry.btime == timestamp else ".")
     )
 
 
-def decode_record(line: str) -> tuple[Timestamp, TimelineEntry]:
-    """Decode an intermediate record back into (timestamp, entry)."""
-    parts = line.rstrip("\n").split("\t", 7)
-    timestamp = int(parts[0])
-    entry = TimelineEntry(
-        md5=parts[6],
-        name=parts[7],
-        size=int(parts[5]),
-        atime=int(parts[1]),
-        mtime=int(parts[2]),
-        ctime=int(parts[3]),
-        btime=int(parts[4]),
-    )
-    return timestamp, entry
+@dataclass(frozen=True)
+class RenderOptions:
+    """How a row is rendered to its final string.
+
+    Bundled into one object so it threads cleanly from the processor through
+    the (module-level, can't-see-self) worker to render_row; a new render flag
+    is added here and used in render_row, without touching every call site.
+    """
+
+    show_md5: bool = False
+    jsonl: bool = False
+    highlighter: Optional[KeywordHighlighter] = None
+
+
+def render_row(timestamp: Timestamp, entry: TimelineEntry, opts: RenderOptions) -> str:
+    """Render one timeline row to its final output string.
+
+    Shared by the in-process path and the parallel workers so both produce
+    byte-identical output. Pure with respect to the global display timezone
+    (read by format_datetime/format_iso); does not touch stats.
+    """
+    macb = _macb_for(entry, timestamp)
+
+    if opts.jsonl:
+        return json.dumps(entry.to_json_dict(timestamp, macb))
+
+    date_str = format_datetime(timestamp)
+    md5_str = f"{entry.md5:<{MD5_LENGTH}}" if opts.show_md5 else ""
+    base_line = f"{date_str}: {md5_str}{macb} {entry.name}"
+
+    if opts.highlighter is not None:
+        base_line = opts.highlighter.highlight(base_line)
+
+    if entry.size == 0:
+        return f"{Fore.LIGHTBLACK_EX}{base_line}{Style.RESET_ALL}"
+    return base_line
+
+
+# NUL separates the merge sort key from the already-rendered payload. NUL can
+# never appear in a Unix path or in our formatted output, so it is a safe
+# delimiter (unlike tab, which is a legal filename character).
+_RECORD_SEP = "\x00"
+
+
+def encode_record(timestamp: Timestamp, name: PathStr, payload: str) -> str:
+    """Encode one already-rendered row as an intermediate record.
+
+    The record carries only the sort key (timestamp, name) and the final
+    rendered payload -- the worker has already done all formatting, so the
+    parent merge does no per-row TimelineEntry reconstruction or formatting.
+    The payload may contain ANSI codes; it is never part of the sort key.
+    """
+    return f"{timestamp}{_RECORD_SEP}{name}{_RECORD_SEP}{payload}"
+
+
+def decode_record(line: str) -> tuple[Timestamp, PathStr, str]:
+    """Decode an intermediate record into (timestamp, name, rendered payload)."""
+    ts_str, name, payload = line.split(_RECORD_SEP, 2)
+    return int(ts_str), name, payload.rstrip("\n")
 
 
 class TimelineProcessor:
@@ -297,9 +341,9 @@ class TimelineProcessor:
         self.since_ts = _boundary_epoch(since)
         self.until_ts = _boundary_epoch(until)
         self.time_filters = time_filters or TIMESTAMP_TYPES
-        self.show_md5 = show_md5
-        self.jsonl = jsonl
-        self.highlighter = highlighter
+        self.render = RenderOptions(
+            show_md5=show_md5, jsonl=jsonl, highlighter=highlighter
+        )
         self.grep_re = grep_re
         self.exclude_re = exclude_re
         # Caller-owned accumulator updated at each emitted row (both paths render
@@ -345,10 +389,10 @@ class TimelineProcessor:
         """Format and yield output lines."""
         last_period = None
 
-        for (timestamp, _), entry in sorted(
-            entries.items(), key=lambda x: (x[0][0], x[0][1])
-        ):
-            if self.separate and not self.jsonl:
+        # The dict key is already the (timestamp, name) sort tuple, so sort on
+        # it directly (itemgetter(0)) instead of rebuilding it in a lambda.
+        for (timestamp, _), entry in sorted(entries.items(), key=itemgetter(0)):
+            if self.separate and not self.render.jsonl:
                 current_period = get_period_key(timestamp, self.separate)
                 if last_period is not None and current_period != last_period:
                     yield SEPARATOR
@@ -357,25 +401,10 @@ class TimelineProcessor:
             yield self._format_line(timestamp, entry)
 
     def _format_line(self, timestamp: Timestamp, entry: TimelineEntry) -> str:
-        """Format a single timeline entry."""
+        """Format a single timeline entry (and accumulate stats)."""
         if self.stats is not None:
             self._record_stats(timestamp)
-
-        macb = self._generate_macb(entry, timestamp)
-
-        if self.jsonl:
-            return json.dumps(entry.to_json_dict(timestamp, macb))
-
-        date_str = format_datetime(timestamp)
-        md5_str = f"{entry.md5:<{MD5_LENGTH}}" if self.show_md5 else ""
-        base_line = f"{date_str}: {md5_str}{macb} {entry.name}"
-
-        if self.highlighter and not self.jsonl:
-            base_line = self.highlighter.highlight(base_line)
-
-        if entry.size == 0:
-            return f"{Fore.LIGHTBLACK_EX}{base_line}{Style.RESET_ALL}"
-        return base_line
+        return render_row(timestamp, entry, self.render)
 
     def _record_stats(self, timestamp: Timestamp) -> None:
         """Accumulate count and time span for the emitted rows."""
@@ -386,15 +415,17 @@ class TimelineProcessor:
         if s["max_ts"] is None or timestamp > s["max_ts"]:
             s["max_ts"] = timestamp
 
-    def _generate_macb(self, entry: TimelineEntry, timestamp: Timestamp) -> str:
-        """Generate the MACB string for a timeline entry."""
-        return _macb_for(entry, timestamp)
 
-
-@lru_cache(maxsize=1024)
 def format_datetime(timestamp: Timestamp) -> str:
-    """Format a timestamp as a datetime string in the display timezone."""
-    return datetime.fromtimestamp(timestamp, tz=_DISPLAY_TZ).strftime(DATETIME_FORMATS[0])
+    """Format a timestamp as a datetime string in the display timezone.
+
+    Hot path: runs once per emitted row. strftime is comparatively slow and the
+    timestamps rarely repeat (so an lru_cache barely hits), so build the fixed
+    "YYYY-MM-DD HH:MM:SS" layout directly from the datetime components.
+    """
+    # isoformat(sep=" ") yields "YYYY-MM-DD HH:MM:SS[+HH:MM]" in one C call;
+    # slicing to 19 chars drops the offset, matching the fixed display layout.
+    return datetime.fromtimestamp(timestamp, tz=_DISPLAY_TZ).isoformat(sep=" ")[:19]
 
 
 @lru_cache(maxsize=1024)
@@ -428,19 +459,31 @@ def parse_datetime(dt_str: str) -> datetime:
         f"Time data '{dt_str}' does not match any of the supported formats: {', '.join(DATETIME_FORMATS)}"
     )
 
+def _worker_init(tz_name: str) -> None:
+    """Pool initializer: set each worker's display timezone.
+
+    Workers render rows themselves, so they must agree with the parent on the
+    display timezone. Fork inherits it, but setting it explicitly makes the
+    chunked path correct under any multiprocessing start method.
+    """
+    set_display_tz(tz_name if tz_name != "UTC" else None)
+
+
 def _process_chunk_worker(
     chunk: List[str],
     time_filters: Optional[Set[str]],
     since_ts: Optional[int],
     until_ts: Optional[int],
-    grep_re: Optional[Pattern] = None,
-    exclude_re: Optional[Pattern] = None,
+    grep_re: Optional[Pattern],
+    exclude_re: Optional[Pattern],
+    render: RenderOptions,
 ) -> Optional[str]:
-    """Parse and filter a chunk, writing sorted intermediate records to a temp file.
+    """Parse, filter, and fully render a chunk into a sorted temp file.
 
-    Runs in a worker process. Emits only ANSI-free intermediate records (no
-    formatting, no MACB text, no color) so the parent owns all presentation and
-    the sort key stays clean. Returns the temp file path, or None on empty/error.
+    Runs in a worker process. The expensive per-row work -- MACB, datetime
+    formatting, JSON/highlight rendering -- happens here, on the worker cores,
+    so the parent's serial k-way merge only parses the sort key and emits the
+    precomputed payload. Returns the temp file path, or None on empty/error.
     """
     filters = time_filters or TIMESTAMP_TYPES
     try:
@@ -469,7 +512,8 @@ def _process_chunk_worker(
         )
         try:
             for timestamp, name in sorted(records):
-                temp_file.write(encode_record(timestamp, records[timestamp, name]) + "\n")
+                payload = render_row(timestamp, records[timestamp, name], render)
+                temp_file.write(encode_record(timestamp, name, payload) + "\n")
             temp_file.close()
             return temp_file.name
         except Exception:
@@ -489,7 +533,10 @@ class ChunkedTimelineProcessor(TimelineProcessor):
     across chunk boundaries, and renders each row with the shared formatter.
     """
 
-    CHUNK_SIZE = 100000  # Number of lines per chunk
+    # Smaller chunks keep more worker cores busy (a 100k chunk on a 300k input
+    # used only 3 of N cores); 25k was near-optimal in benchmarks while keeping
+    # the open-temp-file count bounded for very large inputs.
+    CHUNK_SIZE = 25000  # Number of lines per chunk
     MAX_WORKERS = max(1, (os.cpu_count() or 2) - 1)
 
     def __init__(self, *args, **kwargs):
@@ -521,6 +568,7 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                 self.until_ts,
                 self.grep_re,
                 self.exclude_re,
+                self.render,
             )
             pending[future] = next_index
             next_index += 1
@@ -533,7 +581,11 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                 results[index] = temp_file
 
         current_chunk: List[str] = []
-        with ProcessPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
+        with ProcessPoolExecutor(
+            max_workers=self.MAX_WORKERS,
+            initializer=_worker_init,
+            initargs=(_DISPLAY_TZ.key,),
+        ) as executor:
             for line in stream:
                 current_chunk.append(line)
                 if len(current_chunk) >= self.CHUNK_SIZE:
@@ -553,9 +605,16 @@ class ChunkedTimelineProcessor(TimelineProcessor):
         return [results[i] for i in sorted(results)]
 
     def _sort_and_merge(self, temp_files: List[str]) -> Iterator[str]:
-        """K-way merge sorted temp files by (timestamp, name); dedup adjacents."""
+        """K-way merge sorted temp files by (timestamp, name); dedup adjacents.
+
+        Workers already rendered each row, so this serial step only parses the
+        sort key and emits the precomputed payload -- no per-row formatting.
+        """
         if not temp_files:
             return
+
+        record_stats = self._record_stats if self.stats is not None else None
+        emit_separator = bool(self.separate) and not self.render.jsonl
 
         heap: list = []
         file_handles = []
@@ -565,30 +624,32 @@ class ChunkedTimelineProcessor(TimelineProcessor):
                 file_handles.append(fh)
                 line = fh.readline()
                 if line:
-                    timestamp, entry = decode_record(line)
-                    # file_index is unique per handle, so it breaks ties before
-                    # the (non-comparable) entry is ever reached.
-                    heapq.heappush(heap, (timestamp, entry.name, file_index, entry, fh))
+                    timestamp, name, payload = decode_record(line)
+                    # file_index is unique per handle, so it breaks ties
+                    # deterministically before the payload is ever compared.
+                    heapq.heappush(heap, (timestamp, name, file_index, payload, fh))
 
             last_period = None
             last_key = None
             while heap:
-                timestamp, name, file_index, entry, fh = heapq.heappop(heap)
+                timestamp, name, file_index, payload, fh = heapq.heappop(heap)
 
                 key = (timestamp, name)
                 if key != last_key:
-                    if self.separate and not self.jsonl:
+                    if emit_separator:
                         current_period = get_period_key(timestamp, self.separate)
                         if last_period is not None and current_period != last_period:
                             yield SEPARATOR
                         last_period = current_period
-                    yield self._format_line(timestamp, entry)
+                    if record_stats is not None:
+                        record_stats(timestamp)
+                    yield payload
                     last_key = key
 
                 line = fh.readline()
                 if line:
-                    timestamp, entry = decode_record(line)
-                    heapq.heappush(heap, (timestamp, entry.name, file_index, entry, fh))
+                    timestamp, name, payload = decode_record(line)
+                    heapq.heappush(heap, (timestamp, name, file_index, payload, fh))
         finally:
             for fh in file_handles:
                 try:
