@@ -10,10 +10,11 @@ A memory-efficient Python script for processing and analyzing bodyfile timeline 
   (small inputs run in-process; large ones are chunked across CPU cores)
 - Merge multiple bodyfiles (and globs) into one globally-sorted timeline
 - Filter entries by timestamp types (atime, mtime, ctime, btime)
-- Date range filtering with `--since`, `--to`, and `--around` (full-day when a
-  date is given, exact when a time is given)
+- Date range filtering with `--since`/`--after`, `--to`/`--before`, and
+  `--around` (full-day when a date is given, exact when a time is given)
 - Path filtering with `--grep` / `--exclude` regexes
-- Timeline separation by day, week, month, or year
+- Timeline separation by hour, day, week, month, or year (adverb aliases:
+  `--separate hourly|daily|weekly|monthly|yearly`)
 - Keyword highlighting from a keyword file
 - JSON Lines output with numeric epoch, ISO-8601 timestamp, and all four times
 - Timestamps rendered and filtered in **UTC by default**, overridable with `--tz`
@@ -45,13 +46,14 @@ Options:
   -o, --output FILENAME           Write output to a file instead of stdout
   --stats                         Print summary statistics (count, time span)
                                   to stderr
-  --separate [day|week|month|year]
+  --separate [hour|hourly|day|daily|week|weekly|month|monthly|year|yearly]
                                   Add separator when crossing specified time
-                                  period
-  --since TEXT                    Filter entries since this date/time (YYYY-
-                                  MM-DD [HH:MM:SS])
-  --to TEXT                       Filter entries up to this date/time (YYYY-
-                                  MM-DD [HH:MM:SS])
+                                  period (e.g. day/daily, week/weekly; also
+                                  hour/hourly)
+  --after, --since TEXT           Filter entries at/after this date/time
+                                  (YYYY-MM-DD [HH:MM:SS]); alias: --since
+  --before, --to TEXT             Filter entries at/before this date/time
+                                  (YYYY-MM-DD [HH:MM:SS]); alias: --to
   --around TEXT                   Filter entries around this date/time (YYYY-
                                   MM-DD [HH:MM:SS])
   --window INTEGER                Number of days before and after for --around
@@ -88,7 +90,7 @@ $ timeliner.py timeline.body
 2023-06-12 15:45:23: m... /var/log/syslog
 ```
 
-Show entries since a specific date:
+Show entries since a specific date (`--after` is an alias for `--since`):
 
 ```
 $ timeliner.py --since "2023-06-12 15:40:00" bodyfile.txt
@@ -96,10 +98,10 @@ $ timeliner.py --since "2023-06-12 15:40:00" bodyfile.txt
 2023-06-12 15:45:23: m... /var/log/syslog
 ```
 
-Show entries within a date range:
+Show entries within a date range (`--after`/`--before` also work):
 
 ```
-$ timeliner.py --since "2023-06-12" --to "2023-06-13" bodyfile.txt
+$ timeliner.py --after "2023-06-12" --before "2023-06-13" bodyfile.txt
 2023-06-12 15:39:49: macb /etc/passwd
 2023-06-12 15:40:00: .a.. /home/user/document.txt
 2023-06-13 09:15:22: m... /var/log/syslog
@@ -116,7 +118,8 @@ $ timeliner.py --around "2023-06-12" bodyfile.txt
 
 ### Display options
 
-Add day separators:
+Add day separators (`--separate daily` is an alias; `hourly`, `weekly`,
+`monthly`, and `yearly` work too):
 
 ```
 $ timeliner.py --separate day bodyfile.txt

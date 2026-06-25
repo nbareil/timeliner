@@ -829,3 +829,58 @@ def test_prefilter_open_ended_since_and_to(runner, tmp_path):
     r = runner.invoke(main, [str(input_file), "--to", "2024-01-01"])
     assert r.exit_code == 0
     assert "/past/file" in r.output and "/future/file" not in r.output
+
+
+# --- --after/--before aliases and --separate adverb/hour aliases ------------
+
+
+def test_after_alias_matches_since(runner, sample_bodyfile):
+    after = runner.invoke(main, [str(sample_bodyfile), "--after", "2021-06-12"])
+    since = runner.invoke(main, [str(sample_bodyfile), "--since", "2021-06-12"])
+    assert after.exit_code == 0
+    assert after.output == since.output
+
+
+def test_before_alias_matches_to(runner, sample_bodyfile):
+    before = runner.invoke(main, [str(sample_bodyfile), "--before", "2021-06-12"])
+    to = runner.invoke(main, [str(sample_bodyfile), "--to", "2021-06-12"])
+    assert before.exit_code == 0
+    assert before.output == to.output
+
+
+def test_separate_adverb_aliases_match_nouns(runner, sample_bodyfile):
+    for adverb, noun in (("daily", "day"), ("weekly", "week"),
+                         ("monthly", "month"), ("yearly", "year")):
+        a = runner.invoke(main, [str(sample_bodyfile), "--separate", adverb])
+        n = runner.invoke(main, [str(sample_bodyfile), "--separate", noun])
+        assert a.exit_code == 0, adverb
+        assert a.output == n.output, adverb
+
+
+def test_separate_hourly(runner, tmp_path):
+    # Two entries one hour apart must be split by an hourly separator.
+    content = "\n".join(
+        [
+            "md5|/a|0|0|0|0|1024|1704067200|1704067200|1704067200|1704067200",  # 00:00
+            "md5|/b|0|0|0|0|1024|1704070800|1704070800|1704070800|1704070800",  # 01:00
+        ]
+    )
+    input_file = tmp_path / "hourly.txt"
+    input_file.write_text(content)
+
+    result = runner.invoke(main, [str(input_file), "--separate", "hourly"])
+    assert result.exit_code == 0
+    lines = result.output.strip().split("\n")
+    assert lines[0].endswith("/a")
+    assert lines[1] == "-" * 50
+    assert lines[2].endswith("/b")
+
+    # "hour" (noun) is equivalent to "hourly".
+    noun = runner.invoke(main, [str(input_file), "--separate", "hour"])
+    assert noun.output == result.output
+
+
+def test_separate_invalid_value_rejected(runner, sample_bodyfile):
+    result = runner.invoke(main, [str(sample_bodyfile), "--separate", "bogus"])
+    assert result.exit_code != 0
+    assert "not one of" in result.output

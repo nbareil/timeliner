@@ -530,10 +530,32 @@ def format_iso(timestamp: Timestamp) -> str:
     return datetime.fromtimestamp(timestamp, tz=_DISPLAY_TZ).isoformat()
 
 
+# Maps every accepted --separate value to a canonical period. Both the noun
+# forms (day, week, ...) and the adverb aliases (daily, weekly, ...) are
+# supported; "hourly"/"hour" add an hour-level period.
+SEPARATE_PERIODS = {
+    "hour": "hour",
+    "hourly": "hour",
+    "day": "day",
+    "daily": "day",
+    "week": "week",
+    "weekly": "week",
+    "month": "month",
+    "monthly": "month",
+    "year": "year",
+    "yearly": "year",
+}
+
+
 @lru_cache(maxsize=128)
 def get_period_key(timestamp: Timestamp, period: str) -> str:
-    """Generate a period key for timeline separation."""
+    """Generate a period key for timeline separation.
+
+    `period` is a canonical period name (see SEPARATE_PERIODS values).
+    """
     dt = datetime.fromtimestamp(timestamp, tz=_DISPLAY_TZ)
+    if period == "hour":
+        return dt.strftime("%Y-%m-%d %H")
     if period == "day":
         return dt.strftime("%Y-%m-%d")
     elif period == "week":
@@ -896,14 +918,23 @@ def run_timeline(stream: Iterator[str], **processor_kwargs) -> Iterator[str]:
 )
 @click.option(
     "--separate",
-    type=click.Choice(["day", "week", "month", "year"]),
-    help="Add separator when crossing specified time period",
+    type=click.Choice(list(SEPARATE_PERIODS)),
+    help="Add separator when crossing specified time period (e.g. day/daily, "
+    "week/weekly; also hour/hourly)",
 )
 @click.option(
-    "--since", help="Filter entries since this date/time (YYYY-MM-DD [HH:MM:SS])"
+    "--after",
+    "--since",
+    "since",
+    help="Filter entries at/after this date/time (YYYY-MM-DD [HH:MM:SS]); "
+    "alias: --since",
 )
 @click.option(
-    "--to", help="Filter entries up to this date/time (YYYY-MM-DD [HH:MM:SS])"
+    "--before",
+    "--to",
+    "to",
+    help="Filter entries at/before this date/time (YYYY-MM-DD [HH:MM:SS]); "
+    "alias: --to",
 )
 @click.option(
     "--around", help="Filter entries around this date/time (YYYY-MM-DD [HH:MM:SS])"
@@ -975,10 +1006,14 @@ def main(filenames: tuple, output, stats: bool, **kwargs):
 
         stats_acc = {"count": 0, "min_ts": None, "max_ts": None} if stats else None
 
+        # Normalize the --separate alias (e.g. "daily" -> "day") to the
+        # canonical period the processor and get_period_key expect.
+        separate = SEPARATE_PERIODS.get(kwargs["separate"]) if kwargs["separate"] else None
+
         # Process and output (in-process for small inputs, chunked for large)
         lines = run_timeline(
             process_input_files(filenames),
-            separate=kwargs["separate"],
+            separate=separate,
             since=since_dt,
             until=until_dt,
             time_filters=time_filters,
