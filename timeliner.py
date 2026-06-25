@@ -833,6 +833,21 @@ def _has_time_component(dt_str: str) -> bool:
     return ":" in dt_str
 
 
+def _coalesce_alias(
+    primary: Optional[str], alias: Optional[str], primary_name: str, alias_name: str
+) -> Optional[str]:
+    """Return the value from the primary or its back-compat alias.
+
+    Errors if both are given (avoids silently honouring one); returns whichever
+    was supplied, or None if neither.
+    """
+    if primary is not None and alias is not None:
+        raise click.BadParameter(
+            f"{primary_name} and {alias_name} are aliases; pass only one"
+        )
+    return primary if primary is not None else alias
+
+
 def parse_time_range(
     around, since, to, window, **kwargs
 ) -> tuple[Optional[datetime], Optional[datetime]]:
@@ -950,18 +965,18 @@ def run_timeline(stream: Iterator[str], **processor_kwargs) -> Iterator[str]:
 )
 @click.option(
     "--after",
-    "--since",
-    "since",
-    help="Filter entries at/after this date/time (YYYY-MM-DD [HH:MM:SS]); "
-    "alias: --since",
+    "after",
+    help="Filter entries at/after this date/time (YYYY-MM-DD [HH:MM:SS])",
 )
+# Hidden backward-compat alias for --after; not shown in --help.
+@click.option("--since", "since", hidden=True)
 @click.option(
     "--before",
-    "--to",
-    "to",
-    help="Filter entries at/before this date/time (YYYY-MM-DD [HH:MM:SS]); "
-    "alias: --to",
+    "before",
+    help="Filter entries at/before this date/time (YYYY-MM-DD [HH:MM:SS])",
 )
+# Hidden backward-compat alias for --before; not shown in --help.
+@click.option("--to", "to", hidden=True)
 @click.option(
     "--around", help="Filter entries around this date/time (YYYY-MM-DD [HH:MM:SS])"
 )
@@ -1026,6 +1041,14 @@ def main(filenames: tuple, output, stats: bool, **kwargs):
         # Set timezone before parsing time ranges so filter boundaries are
         # interpreted in the display timezone.
         set_display_tz(kwargs["tz"])
+
+        # --after/--before are the promoted names; --since/--to are kept as
+        # hidden back-compat aliases. Coalesce onto since/to (what
+        # parse_time_range expects), rejecting conflicting old+new pairs.
+        kwargs["since"] = _coalesce_alias(kwargs["after"], kwargs["since"],
+                                          "--after", "--since")
+        kwargs["to"] = _coalesce_alias(kwargs["before"], kwargs["to"],
+                                       "--before", "--to")
 
         since_dt, until_dt = parse_time_range(**kwargs)
         time_filters = get_time_filters(**kwargs)

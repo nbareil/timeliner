@@ -13,8 +13,8 @@ A memory-efficient Python script for processing and analyzing bodyfile timeline 
   `--btime`, or exclude with `--no-atime`/`--no-mtime`/`--no-ctime`/`--no-btime`
 - Bogus timestamps (epoch <= 0, i.e. resolving to 1970) are hidden by default;
   pass `--bogus` to include them
-- Date range filtering with `--since`/`--after`, `--to`/`--before`, and
-  `--around` (full-day when a date is given, exact when a time is given)
+- Date range filtering with `--after`, `--before`, and `--around` (full-day
+  when a date is given, exact when a time is given)
 - Path filtering with `--grep` / `--exclude` regexes
 - Timeline separation by hour, day, week, month, or year (adverb aliases:
   `--separate hourly|daily|weekly|monthly|yearly`)
@@ -53,10 +53,10 @@ Options:
                                   Add separator when crossing specified time
                                   period (e.g. day/daily, week/weekly; also
                                   hour/hourly)
-  --after, --since TEXT           Filter entries at/after this date/time
-                                  (YYYY-MM-DD [HH:MM:SS]); alias: --since
-  --before, --to TEXT             Filter entries at/before this date/time
-                                  (YYYY-MM-DD [HH:MM:SS]); alias: --to
+  --after TEXT                    Filter entries at/after this date/time
+                                  (YYYY-MM-DD [HH:MM:SS])
+  --before TEXT                   Filter entries at/before this date/time
+                                  (YYYY-MM-DD [HH:MM:SS])
   --around TEXT                   Filter entries around this date/time (YYYY-
                                   MM-DD [HH:MM:SS])
   --window INTEGER                Number of days before and after for --around
@@ -99,15 +99,15 @@ $ timeliner.py timeline.body
 2023-06-12 15:45:23: m... /var/log/syslog
 ```
 
-Show entries since a specific date (`--after` is an alias for `--since`):
+Show entries at/after a specific date:
 
 ```
-$ timeliner.py --since "2023-06-12 15:40:00" bodyfile.txt
+$ timeliner.py --after "2023-06-12 15:40:00" bodyfile.txt
 2023-06-12 15:40:00: .a.. /home/user/document.txt
 2023-06-12 15:45:23: m... /var/log/syslog
 ```
 
-Show entries within a date range (`--after`/`--before` also work):
+Show entries within a date range:
 
 ```
 $ timeliner.py --after "2023-06-12" --before "2023-06-13" bodyfile.txt
