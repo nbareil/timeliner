@@ -20,10 +20,10 @@ import tempfile
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from functools import lru_cache, partial
+from functools import lru_cache
 from itertools import chain
 from pathlib import Path
-from typing import BinaryIO, Iterator, List, Optional, Pattern, Set, TextIO
+from typing import Iterator, List, Optional, Pattern, Set
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import click
