@@ -28,6 +28,9 @@ The script is self-contained and runs via [uv](https://docs.astral.sh/uv/);
 the inline script header declares its dependencies, so `./timeliner.py` will
 fetch them on first run.
 
+With [Nix](https://nixos.org/) (flakes enabled) you can run it without cloning:
+`nix run github:nbareil/timeliner -- --help`.
+
 ### Dependencies
 
 - colorama
